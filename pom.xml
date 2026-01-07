@@ -9,7 +9,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.0.1</version>
+        <version>3.2.3</version>
         <relativePath/>
     </parent>
 
@@ -59,7 +59,7 @@
             <optional>true</optional>
         </dependency>
 
-        <!-- Single unified test dependency -->
+        <!-- Unified Test dependency -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
