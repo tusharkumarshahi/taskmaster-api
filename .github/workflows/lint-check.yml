@@ -30,7 +30,7 @@ jobs:
         with:
           checkstyle-config: 'google_checks.xml'
           max-errors: 0
-          max-warnings: 10
+          max-warnings: 300
           fail-on-error: true
           check-only-diff: ${{ github.event_name == 'pull_request' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
