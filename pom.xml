@@ -21,6 +21,7 @@
     <properties>
         <java.version>21</java.version>
         <checkstyle.config.location>google_checks.xml</checkstyle.config.location>
+        <lombok.version>1.18.30</lombok.version>
     </properties>
 
     <dependencies>
@@ -55,16 +56,12 @@
             <artifactId>jackson-databind</artifactId>
         </dependency>
 
-        <!-- Lombok with annotation processing -->
+        <!-- Lombok: available at compile/test, excluded at runtime -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
-            <scope>compileOnly</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <scope>test</scope>
+            <version>${lombok.version}</version>
+            <scope>provided</scope>
         </dependency>
 
         <!-- Testing: JUnit 5, Mockito, Spring Boot test slices, MockMvc, Jackson test utilities -->

@@ -1,5 +1,6 @@
 package com.example.taskmaster.repository;
 
+import com.example.taskmaster.config.AuditingConfig;
 import com.example.taskmaster.config.TestAuditingConfig;
 import com.example.taskmaster.model.Status;
 import com.example.taskmaster.model.Task;
@@ -11,7 +12,7 @@ import org.springframework.context.annotation.Import;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @DataJpaTest
-@Import(TestAuditingConfig.class)
+@Import({AuditingConfig.class, TestAuditingConfig.class})
 class TaskRepositoryTest {
 
     @Autowired
