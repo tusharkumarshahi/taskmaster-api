@@ -73,4 +73,84 @@ class TaskServiceImplTest {
         var all = service.getAllTasks();
         assertThat(all).hasSize(1);
     }
+
+    @Test
+    void updateTask_shouldUpdateExistingTask() {
+        Task existing = Task.builder()
+                .id(10L)
+                .title("Old Title")
+                .description("Old Desc")
+                .status(Status.TODO)
+                .build();
+
+        Task updated = Task.builder()
+                .id(10L)
+                .title("New Title")
+                .description("New Desc")
+                .status(Status.IN_PROGRESS)
+                .build();
+
+        when(repository.findById(10L)).thenReturn(Optional.of(existing));
+        when(repository.save(ArgumentMatchers.any(Task.class))).thenReturn(updated);
+
+        TaskRequest request = TaskRequest.builder()
+                .title("New Title")
+                .description("New Desc")
+                .status(Status.IN_PROGRESS)
+                .build();
+
+        var response = service.updateTask(10L, request);
+
+        assertThat(response.getId()).isEqualTo(10L);
+        assertThat(response.getTitle()).isEqualTo("New Title");
+        assertThat(response.getDescription()).isEqualTo("New Desc");
+        assertThat(response.getStatus()).isEqualTo(Status.IN_PROGRESS);
+        verify(repository).save(ArgumentMatchers.any(Task.class));
+    }
+
+    @Test
+    void deleteTask_shouldDeleteExistingTask() {
+        when(repository.existsById(5L)).thenReturn(true);
+        doNothing().when(repository).deleteById(5L);
+
+        service.deleteTask(5L);
+
+        verify(repository).existsById(5L);
+        verify(repository).deleteById(5L);
+    }
+
+    @Test
+    void getTask_shouldThrowExceptionWhenNotFound() {
+        when(repository.findById(999L)).thenReturn(Optional.empty());
+
+        assertThrows(TaskNotFoundException.class, () -> service.getTask(999L));
+    }
+
+    @Test
+    void updateStatus_shouldThrowExceptionWhenNotFound() {
+        when(repository.findById(777L)).thenReturn(Optional.empty());
+
+        assertThrows(TaskNotFoundException.class, () -> service.updateStatus(777L, Status.DONE));
+    }
+
+    @Test
+    void createTask_shouldSetDefaultStatus() {
+        Task savedTask = Task.builder()
+                .id(20L)
+                .title("No Status Task")
+                .description("Desc")
+                .status(Status.TODO)
+                .build();
+
+        when(repository.save(ArgumentMatchers.any(Task.class))).thenReturn(savedTask);
+
+        TaskRequest request = TaskRequest.builder()
+                .title("No Status Task")
+                .description("Desc")
+                .build();
+
+        var response = service.createTask(request);
+
+        assertThat(response.getStatus()).isEqualTo(Status.TODO);
+    }
 }
