@@ -301,13 +301,81 @@ jobs:
           echo "coverage=${COVERAGE}" >> "$GITHUB_OUTPUT"
           echo "SonarQube Coverage: ${COVERAGE}%"
 
-      - name: Comment Sonar coverage on PR
+      - name: Fetch Quality Gate status
+        id: sonar-qg
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+        run: |
+          PR_NUMBER="${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          if [ -n "$PR_NUMBER" ]; then
+            RESP=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}&pullRequest=${PR_NUMBER}")
+          else
+            BRANCH="${{ github.ref_name }}"
+            RESP=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}&branch=${BRANCH}")
+          fi
+          STATUS=$(echo "$RESP" | jq -r '.projectStatus.status // "UNKNOWN"')
+          SUMMARY=$(echo "$RESP" | jq -r '.projectStatus.conditions[]? | "- " + (.metricKey // "metric") + ": " + (.status // "NA") + " (actual: " + (.actualValue // "n/a") + ", op: " + (.comparator // "?") + ", threshold: " + (.errorThreshold // "n/a") + ")"' | head -5)
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "summary<<EOF" >> "$GITHUB_OUTPUT"
+          echo "${SUMMARY}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch top issues (critical/high)
+        id: sonar-issues
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+        run: |
+          PR_NUMBER="${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          QUERY="types=BUG,VULNERABILITY,CODE_SMELL&severities=BLOCKER,CRITICAL,MAJOR&ps=5&s=FILE_LINE"
+          if [ -n "$PR_NUMBER" ]; then
+            RESP=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/issues/search?projectKeys=${SONAR_PROJECT_KEY}&pullRequest=${PR_NUMBER}&${QUERY}")
+          else
+            BRANCH="${{ github.ref_name }}"
+            RESP=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/issues/search?projectKeys=${SONAR_PROJECT_KEY}&branch=${BRANCH}&${QUERY}")
+          fi
+          TOP=$(echo "$RESP" | jq -r '.issues[]? | "- [" + (.severity // "NA") + "] " + (.message // "No message") + " (" + ((.component | split(":"))[-1] // "?") + ":" + (((.line // "")) | tostring) + ")"' | head -5)
+          echo "list<<EOF" >> "$GITHUB_OUTPUT"
+          echo "${TOP}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Comment Sonar details on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
+        env:
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           script: |
             const coverage = '${{ steps.sonar-coverage.outputs.coverage }}';
-            const body = `### 🔎 SonarQube Coverage\n\n**Coverage:** ${coverage}%\n\n_Source: SonarQube analysis for this PR._`;
+            const qgStatus = '${{ steps.sonar-qg.outputs.status }}';
+            const qgSummary = `{{ steps.sonar-qg.outputs.summary }}`;
+            const issues = `{{ steps.sonar-issues.outputs.list }}`;
+            const projectKey = process.env.SONAR_PROJECT_KEY || 'project';
+            const host = process.env.SONAR_HOST_URL || 'https://sonarcloud.io';
+            const pr = context.issue.number;
+            const baseUrl = `${host}/project/overview?id=${projectKey}`;
+            const prUrl = `${baseUrl}&pullRequest=${pr}`;
+            const issuesUrl = `${host}/project/issues?id=${projectKey}&pullRequest=${pr}`;
+            const measuresUrl = `${host}/component_measures?id=${projectKey}&metric=coverage&pullRequest=${pr}`;
+
+            const qgBlock = qgSummary && qgSummary.trim() ? `\n${qgSummary}` : '\n- (no conditions reported)';
+            const issueBlock = issues && issues.trim() ? issues : '- No blocker/critical/major issues found';
+
+            const body = `### 🔎 SonarQube Coverage\n\n` +
+              `**Coverage:** ${coverage}%\n` +
+              `**Quality Gate:** ${qgStatus || 'UNKNOWN'}\n` +
+              `\n**Quality Gate details:**${qgBlock}\n` +
+              `\n**Top issues (BLOCKER/CRITICAL/MAJOR):**\n${issueBlock}\n` +
+              `\n**Links:**\n` +
+              `- PR Overview: ${prUrl}\n` +
+              `- PR Issues: ${issuesUrl}\n` +
+              `- Coverage measures: ${measuresUrl}\n` +
+              `\n_Source: SonarQube analysis for this PR._`;
+
             github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
