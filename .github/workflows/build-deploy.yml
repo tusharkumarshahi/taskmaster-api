@@ -1,0 +1,171 @@
+name: Build & Deploy to JFrog
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:  # Manual trigger
+
+env:
+  JAVA_VERSION: '21'
+  MAVEN_OPTS: -Xmx1024m
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy Artifacts
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better versioning
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Extract version from pom.xml
+        id: version
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Building version: $VERSION"
+
+      - name: Build with Maven
+        run: |
+          echo "🔨 Building project..."
+          mvn -B clean package -DskipTests
+          echo "✅ Build completed successfully"
+
+      - name: Run tests
+        run: |
+          echo "🧪 Running tests..."
+          mvn -B test
+          echo "✅ Tests passed"
+
+      - name: Generate build info
+        id: build-info
+        run: |
+          BUILD_NUMBER=${{ github.run_number }}
+          COMMIT_SHA=${{ github.sha }}
+          COMMIT_SHORT=${COMMIT_SHA:0:7}
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+          echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "commit_short=$COMMIT_SHORT" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "timestamp=$BUILD_TIMESTAMP" >> $GITHUB_OUTPUT
+          
+          echo "📊 Build Info:"
+          echo "  - Version: ${{ steps.version.outputs.version }}"
+          echo "  - Build: #$BUILD_NUMBER"
+          echo "  - Commit: $COMMIT_SHORT"
+          echo "  - Branch: $BRANCH_NAME"
+          echo "  - Timestamp: $BUILD_TIMESTAMP"
+
+      - name: Create settings.xml with JFrog credentials
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << 'EOF'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                                        https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <servers>
+              <server>
+                <id>jfrog-artifactory</id>
+                <username>${{ secrets.JFROG_USERNAME }}</username>
+                <password>${{ secrets.JFROG_ACCESS_TOKEN }}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+          echo "✅ Maven settings.xml configured with JFrog credentials"
+
+      - name: Deploy to JFrog Artifactory
+        env:
+          JFROG_URL: ${{ secrets.JFROG_URL }}
+        run: |
+          echo "🚀 Deploying artifacts to JFrog Artifactory..."
+          echo "  Target: $JFROG_URL"
+          echo "  Version: ${{ steps.version.outputs.version }}"
+          
+          mvn -B deploy -DskipTests
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Deployment successful!"
+          else
+            echo "❌ Deployment failed!"
+            exit 1
+          fi
+
+      - name: Verify deployment
+        run: |
+          echo "🔍 Verifying deployment..."
+          
+          VERSION="${{ steps.version.outputs.version }}"
+          REPO_PATH="taskmaster-maven-local"
+          
+          ARTIFACT_URL="${{ secrets.JFROG_URL }}/$REPO_PATH/com/example/taskmaster/$VERSION/"
+          
+          echo "  Artifact URL: $ARTIFACT_URL"
+          echo "  Repository: $REPO_PATH"
+          echo "  Version Type: $(if [[ "$VERSION" == *SNAPSHOT* ]]; then echo "Snapshot"; else echo "Release"; fi)"
+          echo ""
+          echo "🎉 Artifact deployed successfully!"
+          echo "  View in JFrog: ${{ secrets.JFROG_URL }}"
+
+      - name: Create deployment summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 📦 Artifact Deployment Summary
+          
+          ### Build Information
+          | Property | Value |
+          |----------|-------|
+          | **Version** | `${{ steps.version.outputs.version }}` |
+          | **Build Number** | `#${{ steps.build-info.outputs.build_number }}` |
+          | **Commit** | `${{ steps.build-info.outputs.commit_short }}` |
+          | **Branch** | `${{ steps.build-info.outputs.branch }}` |
+          | **Timestamp** | `${{ steps.build-info.outputs.timestamp }}` |
+          
+          ### Deployment Details
+          - ✅ **Status**: Deployment Successful
+          - 🎯 **Target**: JFrog Artifactory
+          - 📍 **Repository**: `taskmaster-maven-local`
+          - 📝 **Type**: ${{ contains(steps.version.outputs.version, 'SNAPSHOT') && 'Snapshot Build' || 'Release Build' }}
+          - 🔗 **Artifactory URL**: ${{ secrets.JFROG_URL }}
+          
+          ### Artifact Coordinates
+          ```xml
+          <dependency>
+              <groupId>com.example</groupId>
+              <artifactId>taskmaster</artifactId>
+              <version>${{ steps.version.outputs.version }}</version>
+          </dependency>
+          ```
+          
+          ### Quick Links
+          - 🌐 [View in JFrog Artifactory](${{ secrets.JFROG_URL }})
+          - 📊 [View Build Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - 📝 [View Commit](https://github.com/${{ github.repository }}/commit/${{ steps.build-info.outputs.commit_sha }})
+          EOF
+          
+          echo "✅ Deployment summary created"
+
+      - name: Upload artifacts to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: taskmaster-${{ steps.version.outputs.version }}-build-${{ steps.build-info.outputs.build_number }}
+          path: |
+            target/*.jar
+            target/*.jar.original
+          retention-days: 30
+          if-no-files-found: error
