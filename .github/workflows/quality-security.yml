@@ -1,0 +1,626 @@
+name: Code Quality - Lint, Security & Coverage
+
+on:
+  pull_request:
+    branches: [main, develop]
+    types: [opened, synchronize, reopened]
+  push:
+    branches: main
+
+jobs:
+  # ═══════════════════════════════════════════════════════════
+  # JOB 1: Checkstyle (Linting)
+  # Runs in parallel with Snyk
+  # ═══════════════════════════════════════════════════════════
+  checkstyle:
+    name: Checkstyle Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run Checkstyle Lint
+        uses: tusharkumarshahi/checkstyle-lint-action@v2
+        with:
+          checkstyle-config: 'google_checks.xml'
+          max-errors: 0
+          max-warnings: 300
+          fail-on-error: true
+          check-only-diff: ${{ github.event_name == 'pull_request' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ═══════════════════════════════════════════════════════════
+  # JOB 2: Snyk Security Scan (NEW!)
+  # Runs in parallel with Checkstyle
+  # ═══════════════════════════════════════════════════════════
+  snyk-security:
+    name: Snyk Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      # ─────────────────────────────────────────────────────────
+      # Install Snyk CLI
+      # ─────────────────────────────────────────────────────────
+      - name: Install Snyk CLI
+        run: |
+          echo "📦 Installing Snyk CLI..."
+          npm install -g snyk
+          snyk --version
+
+      # ─────────────────────────────────────────────────────────
+      # Authenticate with Snyk
+      # ─────────────────────────────────────────────────────────
+      - name: Authenticate Snyk
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          if [ -z "$SNYK_TOKEN" ]; then
+            echo "❌ SNYK_TOKEN is not set"
+            exit 1
+          fi
+          snyk auth $SNYK_TOKEN
+          echo "✅ Authenticated with Snyk"
+
+      # ─────────────────────────────────────────────────────────
+      # Scan Maven dependencies
+      # ─────────────────────────────────────────────────────────
+      - name: Run Snyk test on Maven dependencies
+        id: snyk-test
+        continue-on-error: true
+        run: |
+          echo "🔍 Scanning Maven dependencies with Snyk..."
+          
+          # Run Snyk test for Maven (scans pom.xml)
+          snyk test \
+            --severity-threshold=high \
+            --json \
+            --file=pom.xml \
+            > snyk-report.json || true
+          
+          # Parse results
+          if [ -f snyk-report.json ]; then
+            CRITICAL=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="critical")] | length' 2>/dev/null || echo "0")
+            HIGH=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="high")] | length' 2>/dev/null || echo "0")
+            MEDIUM=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="medium")] | length' 2>/dev/null || echo "0")
+            LOW=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="low")] | length' 2>/dev/null || echo "0")
+            TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
+          else
+            CRITICAL=0
+            HIGH=0
+            MEDIUM=0
+            LOW=0
+            TOTAL=0
+          fi
+          
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high=$HIGH" >> $GITHUB_OUTPUT
+          echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
+          echo "low=$LOW" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🛡️  Snyk Security Scan Results"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  🔴 Critical: $CRITICAL"
+          echo "  🟠 High:     $HIGH"
+          echo "  🟡 Medium:   $MEDIUM"
+          echo "  🟢 Low:      $LOW"
+          echo "  📊 Total:    $TOTAL"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Fail if critical or high vulnerabilities found
+          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            echo "❌ Critical or High severity vulnerabilities found!"
+            echo "   Please fix these vulnerabilities before merging."
+            exit 1
+          else
+            echo "✅ No critical or high severity vulnerabilities found"
+          fi
+
+      # ─────────────────────────────────────────────────────────
+      # Monitor with Snyk (send to dashboard)
+      # ─────────────────────────────────────────────────────────
+      - name: Monitor project with Snyk
+        continue-on-error: true
+        run: |
+          echo "📤 Sending results to Snyk dashboard..."
+          snyk monitor \
+            --project-name="${{ github.repository }}" \
+            --file=pom.xml \
+            || echo "⚠️ Monitoring failed, but continuing..."
+
+      # ─────────────────────────────────────────────────────────
+      # Upload Snyk report as artifact
+      # ─────────────────────────────────────────────────────────
+      - name: Upload Snyk report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-security-report
+          path: snyk-report.json
+          retention-days: 30
+
+      # ─────────────────────────────────────────────────────────
+      # Comment Snyk results on PR
+      # ─────────────────────────────────────────────────────────
+      - name: Comment Snyk results on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const critical = '${{ steps.snyk-test.outputs.critical }}' || '0';
+            const high = '${{ steps.snyk-test.outputs.high }}' || '0';
+            const medium = '${{ steps.snyk-test.outputs.medium }}' || '0';
+            const low = '${{ steps.snyk-test.outputs.low }}' || '0';
+            const total = '${{ steps.snyk-test.outputs.total }}' || '0';
+            
+            const hasIssues = parseInt(critical) > 0 || parseInt(high) > 0;
+            const statusEmoji = hasIssues ? '❌' : '✅';
+            const statusText = hasIssues ? 'FAILED - Action Required' : 'PASSED';
+            
+            let commentBody = `## 🛡️ Snyk Security Scan\n\n`;
+            commentBody += `### ${statusEmoji} Status: ${statusText}\n\n`;
+            
+            commentBody += `| Severity | Count |\n`;
+            commentBody += `|----------|-------|\n`;
+            commentBody += `| 🔴 Critical | **${critical}** |\n`;
+            commentBody += `| 🟠 High | **${high}** |\n`;
+            commentBody += `| 🟡 Medium | ${medium} |\n`;
+            commentBody += `| 🟢 Low | ${low} |\n`;
+            commentBody += `| **Total** | **${total}** |\n\n`;
+            
+            if (hasIssues) {
+              commentBody += `### ⚠️ Action Required\n\n`;
+              commentBody += `Critical or High severity vulnerabilities detected in your dependencies.\n\n`;
+              commentBody += `**Next Steps:**\n`;
+              commentBody += `1. Review the [Snyk Dashboard](https://app.snyk.io) for detailed vulnerability information\n`;
+              commentBody += `2. Download the full security report from workflow artifacts\n`;
+              commentBody += `3. Update vulnerable dependencies:\n`;
+              commentBody += `   \`\`\`bash\n`;
+              commentBody += `   mvn versions:display-dependency-updates\n`;
+              commentBody += `   # Update dependencies in pom.xml\n`;
+              commentBody += `   \`\`\`\n`;
+              commentBody += `4. Re-run this workflow to verify fixes\n\n`;
+            } else {
+              commentBody += `✅ No critical or high severity vulnerabilities detected.\n\n`;
+              if (parseInt(medium) > 0 || parseInt(low) > 0) {
+                commentBody += `ℹ️ ${medium} medium and ${low} low severity issues found. Consider addressing these in a follow-up PR.\n\n`;
+              }
+            }
+            
+            commentBody += `<details>\n`;
+            commentBody += `<summary>📚 About Snyk Security Scanning</summary>\n\n`;
+            commentBody += `Snyk scans your Maven dependencies (\`pom.xml\`) for known security vulnerabilities using:\n`;
+            commentBody += `- CVE database (Common Vulnerabilities and Exposures)\n`;
+            commentBody += `- Snyk's proprietary vulnerability database\n`;
+            commentBody += `- Real-time threat intelligence\n\n`;
+            commentBody += `**Severity Levels:**\n`;
+            commentBody += `- 🔴 **Critical**: Immediate action required\n`;
+            commentBody += `- 🟠 **High**: Should be fixed before merging\n`;
+            commentBody += `- 🟡 **Medium**: Fix in next sprint\n`;
+            commentBody += `- 🟢 **Low**: Address when convenient\n`;
+            commentBody += `</details>\n\n`;
+            
+            commentBody += `---\n`;
+            commentBody += `_🔍 Scanned with [Snyk](https://snyk.io) | Threshold: High/Critical_`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+
+      # ─────────────────────────────────────────────────────────
+      # Add summary to workflow
+      # ─────────────────────────────────────────────────────────
+      - name: Display security summary
+        if: always()
+        run: |
+          echo "## 🛡️ Snyk Security Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔴 Critical | ${{ steps.snyk-test.outputs.critical }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟠 High | ${{ steps.snyk-test.outputs.high }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟡 Medium | ${{ steps.snyk-test.outputs.medium }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟢 Low | ${{ steps.snyk-test.outputs.low }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total** | **${{ steps.snyk-test.outputs.total }}** |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.snyk-test.outputs.critical }}" -gt 0 ] || [ "${{ steps.snyk-test.outputs.high }}" -gt 0 ]; then
+            echo "**Status:** ❌ Failed - Critical/High vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Status:** ✅ Passed - No critical/high vulnerabilities" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ═══════════════════════════════════════════════════════════
+  # JOB 3: Test & Coverage
+  # Only runs if both Checkstyle AND Snyk pass
+  # ═══════════════════════════════════════════════════════════
+  test-coverage:
+    name: Test & Coverage
+    needs: [checkstyle, snyk-security]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+      
+      - name: Run tests with coverage
+        id: test
+        run: |
+          echo "🧪 Running tests with code coverage..."
+          mvn clean test jacoco:report verify --batch-mode
+      
+      - name: Calculate coverage from JaCoCo XML
+        id: coverage
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 Calculating Code Coverage"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          COVERAGE_REPORT="target/site/jacoco/jacoco.xml"
+          
+          if [ ! -f "$COVERAGE_REPORT" ]; then
+            echo "❌ Coverage report not found at $COVERAGE_REPORT"
+            exit 1
+          fi
+          
+          MISSED=$(grep -oP '<counter type="LINE".*?missed="\K[0-9]+' "$COVERAGE_REPORT" | tail -1)
+          COVERED=$(grep -oP '<counter type="LINE".*?covered="\K[0-9]+' "$COVERAGE_REPORT" | tail -1)
+          
+          TOTAL=$((MISSED + COVERED))
+          
+          if [ $TOTAL -eq 0 ]; then
+            PERCENTAGE=0
+            echo "⚠️  No code to analyze"
+          else
+            PERCENTAGE=$(awk "BEGIN {printf \"%.2f\", ($COVERED / $TOTAL) * 100}")
+          fi
+          
+          THRESHOLD=70
+          
+          if (( $(echo "$PERCENTAGE >= 80" | bc -l) )); then
+            STATUS_EMOJI="✅"
+            STATUS_TEXT="Excellent"
+            STATUS_COLOR="🟢"
+          elif (( $(echo "$PERCENTAGE >= 60" | bc -l) )); then
+            STATUS_EMOJI="📊"
+            STATUS_TEXT="Good"
+            STATUS_COLOR="🟡"
+          elif (( $(echo "$PERCENTAGE >= 40" | bc -l) )); then
+            STATUS_EMOJI="⚠️"
+            STATUS_TEXT="Needs Improvement"
+            STATUS_COLOR="🟠"
+          else
+            STATUS_EMOJI="❌"
+            STATUS_TEXT="Poor"
+            STATUS_COLOR="🔴"
+          fi
+          
+          echo ""
+          echo "📈 Coverage Metrics:"
+          echo "  Lines Covered:    $COVERED"
+          echo "  Lines Missed:     $MISSED"
+          echo "  Total Lines:      $TOTAL"
+          echo "  Coverage:         $PERCENTAGE%"
+          echo ""
+          echo "$STATUS_COLOR Status: $STATUS_TEXT ($STATUS_EMOJI)"
+          echo "  Threshold:        $THRESHOLD%"
+          
+          if (( $(echo "$PERCENTAGE >= $THRESHOLD" | bc -l) )); then
+            echo "  Result:           ✅ Passed"
+            THRESHOLD_PASSED=true
+          else
+            echo "  Result:           ❌ Failed"
+            THRESHOLD_PASSED=false
+          fi
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          echo "percentage=$PERCENTAGE" >> $GITHUB_OUTPUT
+          echo "covered=$COVERED" >> $GITHUB_OUTPUT
+          echo "missed=$MISSED" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "status_emoji=$STATUS_EMOJI" >> $GITHUB_OUTPUT
+          echo "status_text=$STATUS_TEXT" >> $GITHUB_OUTPUT
+          echo "threshold_passed=$THRESHOLD_PASSED" >> $GITHUB_OUTPUT
+      
+      - name: Generate coverage badge
+        uses: cicirello/jacoco-badge-generator@v2
+        with:
+          jacoco-csv-file: target/site/jacoco/jacoco.csv
+          badges-directory: .github/badges
+          generate-branches-badge: true
+          generate-coverage-badge: true
+      
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/site/jacoco/
+          retention-days: 7
+      
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const covered = '${{ steps.coverage.outputs.covered }}';
+            const missed = '${{ steps.coverage.outputs.missed }}';
+            const total = '${{ steps.coverage.outputs.total }}';
+            const percentage = '${{ steps.coverage.outputs.percentage }}';
+            const statusEmoji = '${{ steps.coverage.outputs.status_emoji }}';
+            const statusText = '${{ steps.coverage.outputs.status_text }}';
+            
+            let commentBody = `## 📊 Code Coverage Report\n\n`;
+            commentBody += `### ${statusEmoji} Coverage: ${percentage}% - ${statusText}\n\n`;
+            commentBody += `| Metric | Value |\n`;
+            commentBody += `|--------|-------|\n`;
+            commentBody += `| **Coverage** | **${percentage}%** |\n`;
+            commentBody += `| Lines Covered | ${covered} |\n`;
+            commentBody += `| Lines Missed | ${missed} |\n`;
+            commentBody += `| Total Lines | ${total} |\n`;
+            commentBody += `| Threshold | 70% |\n`;
+            commentBody += `| Status | ${'${{ steps.coverage.outputs.threshold_passed }}' === 'true' ? '✅ Passed' : '❌ Failed'} |\n\n`;
+            
+            commentBody += `<details>\n`;
+            commentBody += `<summary>📈 Coverage Guidelines</summary>\n\n`;
+            commentBody += `| Coverage | Status | Description |\n`;
+            commentBody += `|----------|--------|-------------|\n`;
+            commentBody += `| 80%+ | 🟢 Excellent | Well-tested code |\n`;
+            commentBody += `| 60-80% | 🟡 Good | Acceptable coverage |\n`;
+            commentBody += `| 40-60% | 🟠 Fair | Needs improvement |\n`;
+            commentBody += `| <40% | 🔴 Poor | Insufficient testing |\n`;
+            commentBody += `</details>\n\n`;
+            commentBody += `---\n`;
+            commentBody += `_Coverage calculated using JaCoCo_`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+      
+      - name: Display coverage summary
+        run: |
+          echo "## 📊 Code Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Coverage:** ${{ steps.coverage.outputs.percentage }}% ${{ steps.coverage.outputs.status_emoji }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ steps.coverage.outputs.status_text }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Lines Covered | ${{ steps.coverage.outputs.covered }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Lines Missed | ${{ steps.coverage.outputs.missed }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Lines | ${{ steps.coverage.outputs.total }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Coverage %** | **${{ steps.coverage.outputs.percentage }}%** |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Threshold:** 70%" >> $GITHUB_STEP_SUMMARY
+          echo "**Result:** ${{ steps.coverage.outputs.threshold_passed == 'true' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+
+  # ═══════════════════════════════════════════════════════════
+  # JOB 4: SonarQube Analysis
+  # Only runs if all previous checks pass
+  # ═══════════════════════════════════════════════════════════
+  sonar-quality:
+    name: SonarQube Analysis
+    needs: test-coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Build, test, and generate coverage
+        run: |
+          mvn -B clean verify jacoco:report --batch-mode
+
+      - name: SonarQube analysis (Maven)
+        id: sonar
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+          SONAR_ORG: ${{ secrets.SONAR_ORG }}
+        run: |
+          PR_NUMBER="${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          PR_BRANCH="${{ github.head_ref }}"
+          PR_BASE="${{ github.base_ref }}"
+          EXTRA_ARGS=""
+          if [ -n "$SONAR_ORG" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS -Dsonar.organization=$SONAR_ORG"
+          fi
+          if [ -n "$PR_NUMBER" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS -Dsonar.pullrequest.key=$PR_NUMBER -Dsonar.pullrequest.branch=$PR_BRANCH -Dsonar.pullrequest.base=$PR_BASE"
+          fi
+          mvn -B sonar:sonar \
+            -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+            -Dsonar.host.url="$SONAR_HOST_URL" \
+            -Dsonar.login="$SONAR_TOKEN" \
+            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+            -Dsonar.java.binaries=target/classes \
+            -Dsonar.scm.provider=git $EXTRA_ARGS
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Wait for Sonar CE task completion
+        id: wait-ce
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          TASK_FILE="target/sonar/report-task.txt"
+          if [ ! -f "$TASK_FILE" ]; then
+            echo "Sonar task file not found at $TASK_FILE"; exit 1;
+          fi
+          CE_TASK_ID=$(grep 'ceTaskId' "$TASK_FILE" | cut -d'=' -f2)
+          echo "CE_TASK_ID=$CE_TASK_ID"
+          for i in {1..30}; do
+            STATUS=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/ce/task?id=${CE_TASK_ID}" | jq -r .task.status)
+            echo "Status: $STATUS"
+            if [ "$STATUS" = "SUCCESS" ]; then break; fi
+            if [ "$STATUS" = "FAILED" ]; then echo "Sonar CE failed"; exit 1; fi
+            sleep 5
+          done
+
+      - name: Fetch coverage from Sonar
+        id: sonar-coverage
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+        run: |
+          PR_NUMBER="${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          if [ -n "$PR_NUMBER" ]; then
+            RESP=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=coverage&pullRequest=${PR_NUMBER}")
+          else
+            BRANCH="${{ github.ref_name }}"
+            RESP=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=coverage&branch=${BRANCH}")
+          fi
+          COVERAGE=$(echo "$RESP" | jq -r '.component.measures[0].value // "0.0"')
+          echo "coverage=${COVERAGE}" >> "$GITHUB_OUTPUT"
+          echo "SonarQube Coverage: ${COVERAGE}%"
+
+      - name: Fetch Quality Gate status
+        id: sonar-qg
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+        run: |
+          PR_NUMBER="${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          if [ -n "$PR_NUMBER" ]; then
+            RESP=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}&pullRequest=${PR_NUMBER}")
+          else
+            BRANCH="${{ github.ref_name }}"
+            RESP=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}&branch=${BRANCH}")
+          fi
+          STATUS=$(echo "$RESP" | jq -r '.projectStatus.status // "UNKNOWN"')
+          SUMMARY=$(echo "$RESP" | jq -r '.projectStatus.conditions[]? | "- " + (.metricKey // "metric") + ": " + (.status // "NA") + " (actual: " + (.actualValue // "n/a") + ", op: " + (.comparator // "?") + ", threshold: " + (.errorThreshold // "n/a") + ")"' | head -5)
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "summary<<EOF" >> "$GITHUB_OUTPUT"
+          echo "${SUMMARY}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch top issues (critical/high)
+        id: sonar-issues
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+        run: |
+          PR_NUMBER="${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          QUERY="types=BUG,VULNERABILITY,CODE_SMELL&severities=BLOCKER,CRITICAL,MAJOR&ps=5&s=FILE_LINE"
+          if [ -n "$PR_NUMBER" ]; then
+            RESP=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/issues/search?projectKeys=${SONAR_PROJECT_KEY}&pullRequest=${PR_NUMBER}&${QUERY}")
+          else
+            BRANCH="${{ github.ref_name }}"
+            RESP=$(curl -s -u "$SONAR_TOKEN:" "${SONAR_HOST_URL}/api/issues/search?projectKeys=${SONAR_PROJECT_KEY}&branch=${BRANCH}&${QUERY}")
+          fi
+          TOP=$(echo "$RESP" | jq -r '.issues[]? | "- [" + (.severity // "NA") + "] " + (.message // "No message") + " (" + ((.component | split(":"))[-1] // "?") + ":" + (((.line // "")) | tostring) + ")"' | head -5)
+          echo "list<<EOF" >> "$GITHUB_OUTPUT"
+          echo "${TOP}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Comment Sonar details on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          script: |
+            const coverage = '${{ steps.sonar-coverage.outputs.coverage }}';
+            const qgStatus = '${{ steps.sonar-qg.outputs.status }}';
+            const qgSummary = `${{ steps.sonar-qg.outputs.summary }}`;
+            const issues = `${{ steps.sonar-issues.outputs.list }}`;
+            const projectKey = process.env.SONAR_PROJECT_KEY || 'project';
+            const host = process.env.SONAR_HOST_URL || 'https://sonarcloud.io';
+            const pr = context.issue.number;
+            const baseUrl = `${host}/project/overview?id=${projectKey}`;
+            const prUrl = `${baseUrl}&pullRequest=${pr}`;
+            const issuesUrl = `${host}/project/issues?id=${projectKey}&pullRequest=${pr}`;
+            const measuresUrl = `${host}/component_measures?id=${projectKey}&metric=coverage&pullRequest=${pr}`;
+
+            const qgBlock = qgSummary && qgSummary.trim() ? `\n${qgSummary}` : '\n- (no conditions reported)';
+            const issueBlock = issues && issues.trim() ? issues : '- No blocker/critical/major issues found';
+
+            const body = `## 🔎 SonarQube Analysis\n\n` +
+              `**Coverage:** ${coverage}%\n` +
+              `**Quality Gate:** ${qgStatus || 'UNKNOWN'}\n` +
+              `\n**Quality Gate details:**${qgBlock}\n` +
+              `\n**Top issues (BLOCKER/CRITICAL/MAJOR):**\n${issueBlock}\n` +
+              `\n**Links:**\n` +
+              `- [PR Overview](${prUrl})\n` +
+              `- [PR Issues](${issuesUrl})\n` +
+              `- [Coverage Measures](${measuresUrl})\n` +
+              `\n---\n` +
+              `_Source: SonarQube analysis for this PR._`;
+
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+      - name: Display Sonar summary
+        run: |
+          echo "## 🔎 SonarQube Analysis Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Coverage:** ${{ steps.sonar-coverage.outputs.coverage }}%" >> $GITHUB_STEP_SUMMARY
+          echo "**Quality Gate:** ${{ steps.sonar-qg.outputs.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Quality Gate Details:**" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.sonar-qg.outputs.summary }}" >> $GITHUB_STEP_SUMMARY
