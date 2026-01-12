@@ -1,5 +1,7 @@
 # Test Coverage Report
 
+Note: This commit is for CI PR-comment testing.
+
 ## Summary
 ✅ **Overall Coverage: 76%** (Target: 70%)  
 ✅ **Branch Coverage: 37%** (Target: 30%)  
