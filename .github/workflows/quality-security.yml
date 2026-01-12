@@ -101,17 +101,21 @@ jobs:
       - name: Run Snyk test on Maven dependencies
         id: snyk-test
         continue-on-error: true
+        env:
+          MAVEN_CMD: mvn
         run: |
           echo "🔍 Scanning Maven dependencies with Snyk..."
+          
+          # Remove Maven wrapper files to force Snyk to use system Maven
+          rm -f mvnw mvnw.cmd
+          echo "✅ Removed Maven wrapper files"
           
           # Debug: Show what Snyk detects
           echo "📋 Detecting project type..."
           snyk test --print-deps 2>&1 | head -20 || true
           
-          # Run Snyk test explicitly for Maven with package-manager flag
+          # Run Snyk test - it will use system Maven now
           snyk test \
-            --package-manager=maven \
-            --file=pom.xml \
             --json \
             > snyk-report.json 2>&1 || echo '{"ok": false, "vulnerabilities": []}' > snyk-report.json
           
@@ -122,8 +126,6 @@ jobs:
           # Also generate human-readable HTML report
           npm install -g snyk-to-html || true
           snyk test \
-            --package-manager=maven \
-            --file=pom.xml \
             --json \
             2>/dev/null | snyk-to-html -o snyk-report.html 2>/dev/null || echo "<!-- HTML report generation failed -->" > snyk-report.html
           
@@ -221,11 +223,11 @@ jobs:
       # ─────────────────────────────────────────────────────────
       - name: Monitor project with Snyk
         continue-on-error: true
+        env:
+          MAVEN_CMD: mvn
         run: |
           echo "📤 Sending results to Snyk dashboard..."
           snyk monitor \
-            --package-manager=maven \
-            --file=pom.xml \
             --project-name="${{ github.repository }}" \
             || echo "⚠️ Monitoring failed, but continuing..."
 
