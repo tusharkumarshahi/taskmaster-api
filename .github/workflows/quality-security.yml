@@ -104,34 +104,42 @@ jobs:
         run: |
           echo "🔍 Scanning Maven dependencies with Snyk..."
           
-          # Run Snyk test for Maven using direct pom.xml scan (no wrapper needed)
+          # Debug: Show what Snyk detects
+          echo "📋 Detecting project type..."
+          snyk test --print-deps 2>&1 | head -20 || true
+          
+          # Run Snyk test explicitly for Maven with package-manager flag
           snyk test \
-            --all-projects \
-            --detection-depth=1 \
+            --package-manager=maven \
+            --file=pom.xml \
             --json \
             > snyk-report.json 2>&1 || echo '{"ok": false, "vulnerabilities": []}' > snyk-report.json
+          
+          # Debug: Show first few lines of report
+          echo "📄 Snyk report preview:"
+          head -20 snyk-report.json || true
           
           # Also generate human-readable HTML report
           npm install -g snyk-to-html || true
           snyk test \
-            --all-projects \
-            --detection-depth=1 \
-            --severity-threshold=low \
+            --package-manager=maven \
+            --file=pom.xml \
             --json \
-            | snyk-to-html -o snyk-report.html 2>/dev/null || echo "<!-- HTML report generation failed -->" > snyk-report.html
+            2>/dev/null | snyk-to-html -o snyk-report.html 2>/dev/null || echo "<!-- HTML report generation failed -->" > snyk-report.html
           
           # Parse results (handle both single project and multi-project JSON structures)
           if [ -f snyk-report.json ] && [ -s snyk-report.json ]; then
             # Check if JSON is valid
             if jq empty snyk-report.json 2>/dev/null; then
-              # Try parsing as array (multi-project) first, then as single object
-              CRITICAL=$(cat snyk-report.json | jq 'if type=="array" then map(.vulnerabilities[]? | select(.severity=="critical")) | length else [.vulnerabilities[]? | select(.severity=="critical")] | length end' 2>/dev/null || echo "0")
-              HIGH=$(cat snyk-report.json | jq 'if type=="array" then map(.vulnerabilities[]? | select(.severity=="high")) | length else [.vulnerabilities[]? | select(.severity=="high")] | length end' 2>/dev/null || echo "0")
-              MEDIUM=$(cat snyk-report.json | jq 'if type=="array" then map(.vulnerabilities[]? | select(.severity=="medium")) | length else [.vulnerabilities[]? | select(.severity=="medium")] | length end' 2>/dev/null || echo "0")
-              LOW=$(cat snyk-report.json | jq 'if type=="array" then map(.vulnerabilities[]? | select(.severity=="low")) | length else [.vulnerabilities[]? | select(.severity=="low")] | length end' 2>/dev/null || echo "0")
+              # Parse as single Maven project
+              CRITICAL=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="critical")] | length' 2>/dev/null || echo "0")
+              HIGH=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="high")] | length' 2>/dev/null || echo "0")
+              MEDIUM=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="medium")] | length' 2>/dev/null || echo "0")
+              LOW=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="low")] | length' 2>/dev/null || echo "0")
               TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
             else
-              echo "⚠️ Invalid JSON in snyk-report.json"
+              echo "⚠️ Invalid JSON in snyk-report.json - showing content:"
+              cat snyk-report.json | head -50
               CRITICAL=0
               HIGH=0
               MEDIUM=0
@@ -139,14 +147,11 @@ jobs:
               TOTAL=0
             fi
             
-              # Extract top 5 critical/high vulnerabilities with details
+            # Extract top 5 critical/high vulnerabilities with details (only if valid JSON)
+            if [ "$TOTAL" -gt 0 ]; then
               echo "detailed_vulns<<EOF" >> $GITHUB_OUTPUT
               cat snyk-report.json | jq -r '
-                if type=="array" then
-                  map(.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")) | .[:5]
-                else
-                  [.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")] | .[:5]
-                end |
+                [.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")] | .[:5] |
                 .[] |
                 "### [\(.severity | ascii_upcase)] \(.title // .id)\n" +
                 "- **Package**: `\(.packageName)@\(.version)`\n" +
@@ -155,8 +160,10 @@ jobs:
                 "- **Exploit Maturity**: \(.exploitMaturity // "Unknown")\n" +
                 "- **Fix**: \(if .fixedIn | length > 0 then "Upgrade to \(.fixedIn | join(", "))" else "No fix available yet" end)\n" +
                 "- **Description**: \(.description // "No description")\n"
-              ' >> $GITHUB_OUTPUT || echo "" >> $GITHUB_OUTPUT
+              ' >> $GITHUB_OUTPUT 2>/dev/null || echo "" >> $GITHUB_OUTPUT
               echo "EOF" >> $GITHUB_OUTPUT
+            else
+              echo "detailed_vulns=" >> $GITHUB_OUTPUT
             fi
           else
             CRITICAL=0
@@ -190,11 +197,7 @@ jobs:
             echo "📋 Detailed Vulnerability Information:"
             echo ""
             cat snyk-report.json | jq -r '
-              if type=="array" then
-                map(.vulnerabilities[]? | select(.severity=="critical" or .severity=="high"))
-              else
-                [.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")]
-              end |
+              [.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")] |
               .[] |
               "[\(.severity | ascii_upcase)] \(.title // .id)\n" +
               "  Package: \(.packageName)@\(.version)\n" +
@@ -221,8 +224,8 @@ jobs:
         run: |
           echo "📤 Sending results to Snyk dashboard..."
           snyk monitor \
-            --all-projects \
-            --detection-depth=1 \
+            --package-manager=maven \
+            --file=pom.xml \
             --project-name="${{ github.repository }}" \
             || echo "⚠️ Monitoring failed, but continuing..."
 
