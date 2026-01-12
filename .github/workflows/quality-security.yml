@@ -94,11 +94,19 @@ jobs:
           echo "🔍 Scanning Maven dependencies with Snyk..."
           
           # Run Snyk test for Maven (scans pom.xml)
+          # Generate both JSON (for parsing) and human-readable output
           snyk test \
             --severity-threshold=high \
             --json \
             --file=pom.xml \
             > snyk-report.json || true
+          
+          # Also generate human-readable HTML report
+          snyk test \
+            --severity-threshold=low \
+            --file=pom.xml \
+            --json \
+            | snyk-to-html -o snyk-report.html || true
           
           # Parse results
           if [ -f snyk-report.json ]; then
@@ -107,12 +115,29 @@ jobs:
             MEDIUM=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="medium")] | length' 2>/dev/null || echo "0")
             LOW=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="low")] | length' 2>/dev/null || echo "0")
             TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
+            
+            # Extract top 5 critical/high vulnerabilities with details
+            echo "detailed_vulns<<EOF" >> $GITHUB_OUTPUT
+            cat snyk-report.json | jq -r '
+              [.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")] | 
+              .[:5] | 
+              .[] | 
+              "### [\(.severity | ascii_upcase)] \(.title // .id)\n" +
+              "- **Package**: `\(.packageName)@\(.version)`\n" +
+              "- **CVE**: \(.identifiers.CVE[0] // "N/A")\n" +
+              "- **CVSS Score**: \(.cvssScore // "N/A")\n" +
+              "- **Exploit Maturity**: \(.exploitMaturity // "Unknown")\n" +
+              "- **Fix**: \(if .fixedIn | length > 0 then "Upgrade to \(.fixedIn | join(", "))" else "No fix available yet" end)\n" +
+              "- **Description**: \(.description // "No description")\n"
+            ' >> $GITHUB_OUTPUT || echo "" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
           else
             CRITICAL=0
             HIGH=0
             MEDIUM=0
             LOW=0
             TOTAL=0
+            echo "detailed_vulns=" >> $GITHUB_OUTPUT
           fi
           
           echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
@@ -121,6 +146,7 @@ jobs:
           echo "low=$LOW" >> $GITHUB_OUTPUT
           echo "total=$TOTAL" >> $GITHUB_OUTPUT
           
+          echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "🛡️  Snyk Security Scan Results"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -130,11 +156,27 @@ jobs:
           echo "  🟢 Low:      $LOW"
           echo "  📊 Total:    $TOTAL"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
           
-          # Fail if critical or high vulnerabilities found
+          # Print detailed vulnerability information to logs
           if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            echo "📋 Detailed Vulnerability Information:"
+            echo ""
+            cat snyk-report.json | jq -r '
+              [.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")] | 
+              .[] | 
+              "[\(.severity | ascii_upcase)] \(.title // .id)\n" +
+              "  Package: \(.packageName)@\(.version)\n" +
+              "  CVE: \(.identifiers.CVE[0] // "N/A")\n" +
+              "  CVSS: \(.cvssScore // "N/A") | Exploit: \(.exploitMaturity // "Unknown")\n" +
+              "  Fix: \(if .fixedIn | length > 0 then "Upgrade to \(.fixedIn | join(", "))" else "No fix available" end)\n"
+            ' || true
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
             echo "❌ Critical or High severity vulnerabilities found!"
             echo "   Please fix these vulnerabilities before merging."
+            echo "   Download 'snyk-security-report' artifact for full details."
             exit 1
           else
             echo "✅ No critical or high severity vulnerabilities found"
@@ -160,7 +202,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: snyk-security-report
-          path: snyk-report.json
+          path: |
+            snyk-report.json
+            snyk-report.html
           retention-days: 30
 
       # ─────────────────────────────────────────────────────────
@@ -176,6 +220,7 @@ jobs:
             const medium = '${{ steps.snyk-test.outputs.medium }}' || '0';
             const low = '${{ steps.snyk-test.outputs.low }}' || '0';
             const total = '${{ steps.snyk-test.outputs.total }}' || '0';
+            const detailedVulns = `${{ steps.snyk-test.outputs.detailed_vulns }}`;
             
             const hasIssues = parseInt(critical) > 0 || parseInt(high) > 0;
             const statusEmoji = hasIssues ? '❌' : '✅';
@@ -195,9 +240,17 @@ jobs:
             if (hasIssues) {
               commentBody += `### ⚠️ Action Required\n\n`;
               commentBody += `Critical or High severity vulnerabilities detected in your dependencies.\n\n`;
+              
+              // Add detailed vulnerability information if available
+              if (detailedVulns && detailedVulns.trim()) {
+                commentBody += `<details>\n<summary>📋 Top Critical/High Vulnerabilities (Click to expand)</summary>\n\n`;
+                commentBody += detailedVulns;
+                commentBody += `\n</details>\n\n`;
+              }
+              
               commentBody += `**Next Steps:**\n`;
               commentBody += `1. Review the [Snyk Dashboard](https://app.snyk.io) for detailed vulnerability information\n`;
-              commentBody += `2. Download the full security report from workflow artifacts\n`;
+              commentBody += `2. Download the full security report from workflow artifacts (JSON + HTML)\n`;
               commentBody += `3. Update vulnerable dependencies:\n`;
               commentBody += `   \`\`\`bash\n`;
               commentBody += `   mvn versions:display-dependency-updates\n`;
