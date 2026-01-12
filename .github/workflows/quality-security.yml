@@ -94,19 +94,22 @@ jobs:
           echo "🔍 Scanning Maven dependencies with Snyk..."
           
           # Run Snyk test for Maven (scans pom.xml)
-          # Generate both JSON (for parsing) and human-readable output
+          # Use --command=mvn to force system Maven instead of wrapper
           snyk test \
+            --command=mvn \
             --severity-threshold=high \
             --json \
             --file=pom.xml \
             > snyk-report.json || true
           
           # Also generate human-readable HTML report
+          npm install -g snyk-to-html || true
           snyk test \
+            --command=mvn \
             --severity-threshold=low \
             --file=pom.xml \
             --json \
-            | snyk-to-html -o snyk-report.html || true
+            | snyk-to-html -o snyk-report.html 2>/dev/null || echo "<!-- HTML report generation failed -->" > snyk-report.html
           
           # Parse results
           if [ -f snyk-report.json ]; then
@@ -190,6 +193,7 @@ jobs:
         run: |
           echo "📤 Sending results to Snyk dashboard..."
           snyk monitor \
+            --command=mvn \
             --project-name="${{ github.repository }}" \
             --file=pom.xml \
             || echo "⚠️ Monitoring failed, but continuing..."
