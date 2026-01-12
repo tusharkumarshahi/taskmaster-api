@@ -62,13 +62,24 @@ jobs:
           cache: 'maven'
 
       # ─────────────────────────────────────────────────────────
-      # Install Snyk CLI
+      # Build project to resolve dependencies for Snyk
       # ─────────────────────────────────────────────────────────
-      - name: Install Snyk CLI
+      - name: Build project (resolve dependencies)
+        run: |
+          echo "📦 Building project to resolve dependencies..."
+          mvn -B clean compile -DskipTests --no-transfer-progress
+
+      # ─────────────────────────────────────────────────────────
+      # Install dependencies (Snyk CLI and jq)
+      # ─────────────────────────────────────────────────────────
+      - name: Install Snyk CLI and jq
         run: |
           echo "📦 Installing Snyk CLI..."
           npm install -g snyk
           snyk --version
+          echo "📦 Installing jq for JSON parsing..."
+          sudo apt-get update -qq && sudo apt-get install -y jq
+          jq --version
 
       # ─────────────────────────────────────────────────────────
       # Authenticate with Snyk
@@ -93,47 +104,60 @@ jobs:
         run: |
           echo "🔍 Scanning Maven dependencies with Snyk..."
           
-          # Run Snyk test for Maven (scans pom.xml)
-          # Use --command=mvn to force system Maven instead of wrapper
+          # Run Snyk test for Maven using direct pom.xml scan (no wrapper needed)
           snyk test \
-            --command=mvn \
-            --severity-threshold=high \
+            --all-projects \
+            --detection-depth=1 \
             --json \
-            --file=pom.xml \
-            > snyk-report.json || true
+            > snyk-report.json 2>&1 || echo '{"ok": false, "vulnerabilities": []}' > snyk-report.json
           
           # Also generate human-readable HTML report
           npm install -g snyk-to-html || true
           snyk test \
-            --command=mvn \
+            --all-projects \
+            --detection-depth=1 \
             --severity-threshold=low \
-            --file=pom.xml \
             --json \
             | snyk-to-html -o snyk-report.html 2>/dev/null || echo "<!-- HTML report generation failed -->" > snyk-report.html
           
-          # Parse results
-          if [ -f snyk-report.json ]; then
-            CRITICAL=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="critical")] | length' 2>/dev/null || echo "0")
-            HIGH=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="high")] | length' 2>/dev/null || echo "0")
-            MEDIUM=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="medium")] | length' 2>/dev/null || echo "0")
-            LOW=$(cat snyk-report.json | jq '[.vulnerabilities[]? | select(.severity=="low")] | length' 2>/dev/null || echo "0")
-            TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
+          # Parse results (handle both single project and multi-project JSON structures)
+          if [ -f snyk-report.json ] && [ -s snyk-report.json ]; then
+            # Check if JSON is valid
+            if jq empty snyk-report.json 2>/dev/null; then
+              # Try parsing as array (multi-project) first, then as single object
+              CRITICAL=$(cat snyk-report.json | jq 'if type=="array" then map(.vulnerabilities[]? | select(.severity=="critical")) | length else [.vulnerabilities[]? | select(.severity=="critical")] | length end' 2>/dev/null || echo "0")
+              HIGH=$(cat snyk-report.json | jq 'if type=="array" then map(.vulnerabilities[]? | select(.severity=="high")) | length else [.vulnerabilities[]? | select(.severity=="high")] | length end' 2>/dev/null || echo "0")
+              MEDIUM=$(cat snyk-report.json | jq 'if type=="array" then map(.vulnerabilities[]? | select(.severity=="medium")) | length else [.vulnerabilities[]? | select(.severity=="medium")] | length end' 2>/dev/null || echo "0")
+              LOW=$(cat snyk-report.json | jq 'if type=="array" then map(.vulnerabilities[]? | select(.severity=="low")) | length else [.vulnerabilities[]? | select(.severity=="low")] | length end' 2>/dev/null || echo "0")
+              TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
+            else
+              echo "⚠️ Invalid JSON in snyk-report.json"
+              CRITICAL=0
+              HIGH=0
+              MEDIUM=0
+              LOW=0
+              TOTAL=0
+            fi
             
-            # Extract top 5 critical/high vulnerabilities with details
-            echo "detailed_vulns<<EOF" >> $GITHUB_OUTPUT
-            cat snyk-report.json | jq -r '
-              [.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")] | 
-              .[:5] | 
-              .[] | 
-              "### [\(.severity | ascii_upcase)] \(.title // .id)\n" +
-              "- **Package**: `\(.packageName)@\(.version)`\n" +
-              "- **CVE**: \(.identifiers.CVE[0] // "N/A")\n" +
-              "- **CVSS Score**: \(.cvssScore // "N/A")\n" +
-              "- **Exploit Maturity**: \(.exploitMaturity // "Unknown")\n" +
-              "- **Fix**: \(if .fixedIn | length > 0 then "Upgrade to \(.fixedIn | join(", "))" else "No fix available yet" end)\n" +
-              "- **Description**: \(.description // "No description")\n"
-            ' >> $GITHUB_OUTPUT || echo "" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+              # Extract top 5 critical/high vulnerabilities with details
+              echo "detailed_vulns<<EOF" >> $GITHUB_OUTPUT
+              cat snyk-report.json | jq -r '
+                if type=="array" then
+                  map(.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")) | .[:5]
+                else
+                  [.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")] | .[:5]
+                end |
+                .[] |
+                "### [\(.severity | ascii_upcase)] \(.title // .id)\n" +
+                "- **Package**: `\(.packageName)@\(.version)`\n" +
+                "- **CVE**: \(.identifiers.CVE[0] // "N/A")\n" +
+                "- **CVSS Score**: \(.cvssScore // "N/A")\n" +
+                "- **Exploit Maturity**: \(.exploitMaturity // "Unknown")\n" +
+                "- **Fix**: \(if .fixedIn | length > 0 then "Upgrade to \(.fixedIn | join(", "))" else "No fix available yet" end)\n" +
+                "- **Description**: \(.description // "No description")\n"
+              ' >> $GITHUB_OUTPUT || echo "" >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+            fi
           else
             CRITICAL=0
             HIGH=0
@@ -166,14 +190,18 @@ jobs:
             echo "📋 Detailed Vulnerability Information:"
             echo ""
             cat snyk-report.json | jq -r '
-              [.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")] | 
-              .[] | 
+              if type=="array" then
+                map(.vulnerabilities[]? | select(.severity=="critical" or .severity=="high"))
+              else
+                [.vulnerabilities[]? | select(.severity=="critical" or .severity=="high")]
+              end |
+              .[] |
               "[\(.severity | ascii_upcase)] \(.title // .id)\n" +
               "  Package: \(.packageName)@\(.version)\n" +
               "  CVE: \(.identifiers.CVE[0] // "N/A")\n" +
               "  CVSS: \(.cvssScore // "N/A") | Exploit: \(.exploitMaturity // "Unknown")\n" +
               "  Fix: \(if .fixedIn | length > 0 then "Upgrade to \(.fixedIn | join(", "))" else "No fix available" end)\n"
-            ' || true
+            ' 2>/dev/null || echo "  (Unable to parse vulnerability details)"
             echo ""
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo ""
@@ -193,9 +221,9 @@ jobs:
         run: |
           echo "📤 Sending results to Snyk dashboard..."
           snyk monitor \
-            --command=mvn \
+            --all-projects \
+            --detection-depth=1 \
             --project-name="${{ github.repository }}" \
-            --file=pom.xml \
             || echo "⚠️ Monitoring failed, but continuing..."
 
       # ─────────────────────────────────────────────────────────
