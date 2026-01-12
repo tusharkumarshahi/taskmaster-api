@@ -10,6 +10,7 @@ on:
 env:
   JAVA_VERSION: '21'
   MAVEN_OPTS: -Xmx1024m
+  DOCKER_REGISTRY: ${{ secrets.JFROG_DOCKER_REGISTRY }}  # e.g., yourserver.jfrog.io/taskmaster-docker
 
 jobs:
   build-and-deploy:
@@ -108,64 +109,72 @@ jobs:
 
       - name: Verify deployment
         run: |
-          echo "🔍 Verifying deployment..."
-          
           VERSION="${{ steps.version.outputs.version }}"
           REPO_PATH="taskmaster-maven-local"
-          
           ARTIFACT_URL="${{ secrets.JFROG_URL }}/$REPO_PATH/com/example/taskmaster/$VERSION/"
           
-          echo "  Artifact URL: $ARTIFACT_URL"
-          echo "  Repository: $REPO_PATH"
-          echo "  Version Type: $(if [[ "$VERSION" == *SNAPSHOT* ]]; then echo "Snapshot"; else echo "Release"; fi)"
-          echo ""
-          echo "🎉 Artifact deployed successfully!"
-          echo "  View in JFrog: ${{ secrets.JFROG_URL }}"
+          echo "✅ Deployed: taskmaster-$VERSION → JFrog Artifactory"
+          echo "📍 Repository: $REPO_PATH"
+          echo "🔗 URL: $ARTIFACT_URL"
+
+      - name: Build Docker image
+        run: |
+          echo "🐳 Building Docker image..."
+          docker build -t taskmaster:${{ steps.version.outputs.version }} .
+          docker tag taskmaster:${{ steps.version.outputs.version }} \
+            ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.version.outputs.version }}
+          docker tag taskmaster:${{ steps.version.outputs.version }} \
+            ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
+          echo "✅ Docker image built successfully"
+
+      - name: Login to JFrog Docker Registry
+        run: |
+          echo "🔐 Logging into JFrog Docker Registry..."
+          echo "${{ secrets.JFROG_ACCESS_TOKEN }}" | docker login ${{ env.DOCKER_REGISTRY }} \
+            -u ${{ secrets.JFROG_USERNAME }} \
+            --password-stdin
+          echo "✅ Logged in successfully"
+
+      - name: Push Docker image to JFrog
+        run: |
+          echo "📤 Pushing Docker image to JFrog..."
+          docker push ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.version.outputs.version }}
+          docker push ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
+          echo "✅ Docker image pushed successfully"
+
+      - name: Docker image info
+        id: docker-info
+        run: |
+          IMAGE_SIZE=$(docker images ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.version.outputs.version }} --format "{{.Size}}")
+          echo "size=$IMAGE_SIZE" >> $GITHUB_OUTPUT
+          echo "📊 Image size: $IMAGE_SIZE"
 
       - name: Create deployment summary
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## 📦 Artifact Deployment Summary
+          ## 📦 Deployment Successful
           
-          ### Build Information
-          | Property | Value |
-          |----------|-------|
-          | **Version** | `${{ steps.version.outputs.version }}` |
-          | **Build Number** | `#${{ steps.build-info.outputs.build_number }}` |
-          | **Commit** | `${{ steps.build-info.outputs.commit_short }}` |
-          | **Branch** | `${{ steps.build-info.outputs.branch }}` |
-          | **Timestamp** | `${{ steps.build-info.outputs.timestamp }}` |
+          **Version:** `${{ steps.version.outputs.version }}` | **Build:** `#${{ steps.build-info.outputs.build_number }}` | **Commit:** `${{ steps.build-info.outputs.commit_short }}`
           
-          ### Deployment Details
-          - ✅ **Status**: Deployment Successful
-          - 🎯 **Target**: JFrog Artifactory
-          - 📍 **Repository**: `taskmaster-maven-local`
-          - 📝 **Type**: ${{ contains(steps.version.outputs.version, 'SNAPSHOT') && 'Snapshot Build' || 'Release Build' }}
-          - 🔗 **Artifactory URL**: ${{ secrets.JFROG_URL }}
+          ### JAR Artifact
+          - **Repository:** `taskmaster-maven-local`
+          - **Type:** ${{ contains(steps.version.outputs.version, 'SNAPSHOT') && 'Snapshot' || 'Release' }}
           
-          ### Artifact Coordinates
-          ```xml
-          <dependency>
-              <groupId>com.example</groupId>
-              <artifactId>taskmaster</artifactId>
-              <version>${{ steps.version.outputs.version }}</version>
-          </dependency>
+          ### Docker Image
+          - **Registry:** `${{ env.DOCKER_REGISTRY }}`
+          - **Image:** `taskmaster:${{ steps.version.outputs.version }}`
+          - **Size:** `${{ steps.docker-info.outputs.size }}`
+          - **Tags:** `${{ steps.version.outputs.version }}`, `latest`
+          
+          **Pull command:**
+          ```bash
+          docker pull ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.version.outputs.version }}
           ```
           
-          ### Quick Links
-          - 🌐 [View in JFrog Artifactory](${{ secrets.JFROG_URL }})
-          - 📊 [View Build Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          - 📝 [View Commit](https://github.com/${{ github.repository }}/commit/${{ steps.build-info.outputs.commit_sha }})
-          EOF
+          **Run command:**
+          ```bash
+          docker run -p 8080:8080 ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
+          ```
           
-          echo "✅ Deployment summary created"
-
-      - name: Upload artifacts to GitHub
-        uses: actions/upload-artifact@v4
-        with:
-          name: taskmaster-${{ steps.version.outputs.version }}-build-${{ steps.build-info.outputs.build_number }}
-          path: |
-            target/*.jar
-            target/*.jar.original
-          retention-days: 30
-          if-no-files-found: error
+          [View in JFrog](${{ secrets.JFROG_URL }}) • [Commit](${{ github.server_url }}/${{ github.repository }}/commit/${{ steps.build-info.outputs.commit_sha }})
+          EOF
