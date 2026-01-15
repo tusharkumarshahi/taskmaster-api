@@ -127,6 +127,78 @@ jobs:
             ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
           echo "✅ Docker image built successfully"
 
+      - name: Install Snyk CLI
+        run: |
+          echo "📦 Installing Snyk CLI..."
+          npm install -g snyk
+          snyk --version
+
+      - name: Authenticate with Snyk
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk auth $SNYK_TOKEN
+          echo "✅ Authenticated with Snyk"
+
+      - name: Scan Docker image with Snyk
+        id: snyk-container
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          echo "🔍 Scanning Docker image for vulnerabilities..."
+          
+          # Run Snyk container test and capture results
+          snyk container test taskmaster:${{ steps.version.outputs.version }} \
+            --json \
+            --severity-threshold=high \
+            > snyk-container-report.json || true
+          
+          # Parse results
+          VULNERABILITIES=$(jq -r '.uniqueCount // 0' snyk-container-report.json)
+          CRITICAL=$(jq -r '[.vulnerabilities[] | select(.severity == "critical")] | length' snyk-container-report.json)
+          HIGH=$(jq -r '[.vulnerabilities[] | select(.severity == "high")] | length' snyk-container-report.json)
+          MEDIUM=$(jq -r '[.vulnerabilities[] | select(.severity == "medium")] | length' snyk-container-report.json)
+          LOW=$(jq -r '[.vulnerabilities[] | select(.severity == "low")] | length' snyk-container-report.json)
+          BASE_IMAGE=$(jq -r '.docker.baseImage // "unknown"' snyk-container-report.json)
+          
+          # Output for summary
+          echo "vulnerabilities=$VULNERABILITIES" >> $GITHUB_OUTPUT
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high=$HIGH" >> $GITHUB_OUTPUT
+          echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
+          echo "low=$LOW" >> $GITHUB_OUTPUT
+          echo "base_image=$BASE_IMAGE" >> $GITHUB_OUTPUT
+          
+          # Display results
+          echo "📊 Container Scan Results:"
+          echo "  Base Image: $BASE_IMAGE"
+          echo "  Critical: $CRITICAL"
+          echo "  High: $HIGH"
+          echo "  Medium: $MEDIUM"
+          echo "  Low: $LOW"
+          echo "  Total: $VULNERABILITIES"
+          
+          # Fail if critical vulnerabilities found
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "❌ CRITICAL vulnerabilities found! Build failed."
+            echo "📄 See detailed report in snyk-container-report.json"
+            exit 1
+          fi
+          
+          if [ "$HIGH" -gt 0 ]; then
+            echo "⚠️  HIGH severity vulnerabilities found, but continuing..."
+          else
+            echo "✅ No critical or high vulnerabilities found"
+          fi
+
+      - name: Upload Snyk container report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-container-report-${{ steps.version.outputs.version }}
+          path: snyk-container-report.json
+          retention-days: 30
+
       - name: Login to JFrog Docker Registry
         run: |
           echo "🔐 Logging into JFrog Docker Registry..."
@@ -165,6 +237,11 @@ jobs:
           - **Image:** `taskmaster:${{ steps.version.outputs.version }}`
           - **Size:** `${{ steps.docker-info.outputs.size }}`
           - **Tags:** `${{ steps.version.outputs.version }}`, `latest`
+          
+          ### Security Scan
+          - **Base Image:** `${{ steps.snyk-container.outputs.base_image }}`
+          - **Critical:** ${{ steps.snyk-container.outputs.critical }} | **High:** ${{ steps.snyk-container.outputs.high }} | **Medium:** ${{ steps.snyk-container.outputs.medium }} | **Low:** ${{ steps.snyk-container.outputs.low }}
+          - **Total Vulnerabilities:** ${{ steps.snyk-container.outputs.vulnerabilities }}
           
           **Pull command:**
           ```bash
