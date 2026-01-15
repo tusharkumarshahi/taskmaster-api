@@ -193,24 +193,23 @@ jobs:
           docker load -i taskmaster-image.tar
           IMAGE_NAME=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep taskmaster | head -1)
           echo "image=$IMAGE_NAME" >> $GITHUB_OUTPUT
-          echo "✅ Loaded: $IMAGE_NAME
-  # ═══════════════════════════════════════════════════════════
-  build-docker-image:
-    name: Build Docker Image
-    needs: build-and-deploy-jar
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+          echo "✅ Loaded: $IMAGE_NAME"
 
-      - name: Download JAR artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: application-jar
-          path: target/
+      - name: Install Snyk CLI
+        run: |
+          echo "📦 Installing Snyk CLI..."
+          npm install -g snyk
+          snyk --version
 
-      - name: Extscan
+      - name: Authenticate with Snyk
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk auth $SNYK_TOKEN
+          echo "✅ Authenticated with Snyk"
+
+      - name: Scan Docker image with Snyk
+        id: snyk-scan
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -318,7 +317,7 @@ jobs:
       - name: Get image info
         id: image-info
         run: |
-          IMAGE_SIZE=$(docker images ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.load.outputs.version }} --format "{{.Size}}")
+          IMAGE_SIZE=$(docker images "${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.load.outputs.version }}" --format "{{.Size}}")
           echo "size=$IMAGE_SIZE" >> $GITHUB_OUTPUT
 
       - name: Create deployment summary
