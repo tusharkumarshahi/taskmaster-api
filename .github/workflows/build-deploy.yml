@@ -10,7 +10,7 @@ on:
 env:
   JAVA_VERSION: '21'
   MAVEN_OPTS: -Xmx1024m
-  DOCKER_REGISTRY: ${{ secrets.JFROG_DOCKER_REGISTRY }}  # e.g., yourserver.jfrog.io/taskmaster-docker
+  DOCKER_REGISTRY: ${{ secrets.JFROG_DOCKER_REGISTRY }}
 
 jobs:
   # ═══════════════════════════════════════════════════════════
@@ -24,7 +24,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history for better versioning
+          fetch-depth: 0
 
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -44,35 +44,13 @@ jobs:
         run: |
           echo "🔨 Building project..."
           mvn -B clean package -DskipTests
-          echo "✅ Build completed successfully"
+          echo "✅ Build completed"
 
       - name: Run tests
         run: |
           echo "🧪 Running tests..."
           mvn -B test
           echo "✅ Tests passed"
-
-      - name: Generate build info
-        id: build-info
-        run: |
-          BUILD_NUMBER=${{ github.run_number }}
-          COMMIT_SHA=${{ github.sha }}
-          COMMIT_SHORT=${COMMIT_SHA:0:7}
-          BRANCH_NAME=${GITHUB_REF#refs/heads/}
-          BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          
-          echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
-          echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
-          echo "commit_short=$COMMIT_SHORT" >> $GITHUB_OUTPUT
-          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          echo "timestamp=$BUILD_TIMESTAMP" >> $GITHUB_OUTPUT
-          
-          echo "📊 Build Info:"
-          echo "  - Version: ${{ steps.version.outputs.version }}"
-          echo "  - Build: #$BUILD_NUMBER"
-          echo "  - Commit: $COMMIT_SHORT"
-          echo "  - Branch: $BRANCH_NAME"
-          echo "  - Timestamp: $BUILD_TIMESTAMP"
 
       - name: Create settings.xml with JFrog credentials
         run: |
@@ -91,34 +69,15 @@ jobs:
             </servers>
           </settings>
           EOF
-          echo "✅ Maven settings.xml configured with JFrog credentials"
+          echo "✅ Maven settings configured"
 
       - name: Deploy to JFrog Artifactory
         env:
           JFROG_URL: ${{ secrets.JFROG_URL }}
         run: |
-          echo "🚀 Deploying artifacts to JFrog Artifactory..."
-          echo "  Target: $JFROG_URL"
-          echo "  Version: ${{ steps.version.outputs.version }}"
-          
+          echo "🚀 Deploying JAR to JFrog..."
           mvn -B deploy -DskipTests
-          
-          if [ $? -eq 0 ]; then
-            echo "✅ Deployment successful!"
-          else
-            echo "❌ Deployment failed!"
-            exit 1
-          fi
-
-      - name: Verify deployment
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          REPO_PATH="taskmaster-maven-local"
-          ARTIFACT_URL="${{ secrets.JFROG_URL }}/$REPO_PATH/com/example/taskmaster/$VERSION/"
-          
-          echo "✅ Deployed: taskmaster-$VERSION → JFrog Artifactory"
-          echo "📍 Repository: $REPO_PATH"
-          echo "🔗 URL: $ARTIFACT_URL"
+          echo "✅ JAR deployed to taskmaster-maven-local"
 
       - name: Upload JAR for Docker build
         uses: actions/upload-artifact@v4
@@ -145,7 +104,7 @@ jobs:
           name: application-jar
           path: target/
 
-      - name: Extract version from filename
+      - name: Extract version
         id: version
         run: |
           JAR_FILE=$(ls target/taskmaster-*.jar | head -1)
@@ -157,15 +116,14 @@ jobs:
         run: |
           echo "🐳 Building Docker image..."
           docker build -t taskmaster:${{ steps.version.outputs.version }} .
-          echo "✅ Docker image built successfully"
+          echo "✅ Image built"
 
       - name: Save Docker image
         run: |
-          echo "💾 Saving Docker image..."
           docker save taskmaster:${{ steps.version.outputs.version }} -o taskmaster-image.tar
           echo "✅ Image saved"
 
-      - name: Upload Docker image artifact
+      - name: Upload Docker image
         uses: actions/upload-artifact@v4
         with:
           name: docker-image
@@ -173,7 +131,7 @@ jobs:
           retention-days: 1
 
   # ═══════════════════════════════════════════════════════════
-  # JOB 3: Security Scan (Snyk Container)
+  # JOB 3: Security Scan
   # ═══════════════════════════════════════════════════════════
   security-scan:
     name: Container Security Scan
@@ -189,7 +147,6 @@ jobs:
       - name: Load Docker image
         id: load
         run: |
-          echo "📦 Loading Docker image..."
           docker load -i taskmaster-image.tar
           IMAGE_NAME=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep taskmaster | head -1)
           echo "image=$IMAGE_NAME" >> $GITHUB_OUTPUT
@@ -197,7 +154,6 @@ jobs:
 
       - name: Install Snyk CLI
         run: |
-          echo "📦 Installing Snyk CLI..."
           npm install -g snyk
           snyk --version
 
@@ -206,93 +162,52 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           snyk auth $SNYK_TOKEN
-          echo "✅ Authenticated with Snyk"
+          echo "✅ Authenticated"
 
-      - name: Scan Docker image with Snyk
+      - name: Scan with Snyk
         id: snyk-scan
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          echo "🔍 Scanning Docker image for vulnerabilities..."
-          
-          # Install jq for JSON parsing
+          echo "🔍 Scanning image..."
           sudo apt-get update -qq && sudo apt-get install -y jq
           
-          # Run Snyk container test and capture results
           snyk container test ${{ steps.load.outputs.image }} \
-            --json \
-            --severity-threshold=high \
-            > snyk-container-report.json || true
+            --json --severity-threshold=high > snyk-report.json || true
           
-          # Parse results
-          VULNERABILITIES=$(jq -r '.uniqueCount // 0' snyk-container-report.json)
-          CRITICAL=$(jq -r '[.vulnerabilities[] | select(.severity == "critical")] | length' snyk-container-report.json)
-          HIGH=$(jq -r '[.vulnerabilities[] | select(.severity == "high")] | length' snyk-container-report.json)
-          MEDIUM=$(jq -r '[.vulnerabilities[] | select(.severity == "medium")] | length' snyk-container-report.json)
-          LOW=$(jq -r '[.vulnerabilities[] | select(.severity == "low")] | length' snyk-container-report.json)
-          BASE_IMAGE=$(jq -r '.docker.baseImage // "unknown"' snyk-container-report.json)
+          VULNERABILITIES=$(jq -r '.uniqueCount // 0' snyk-report.json)
+          CRITICAL=$(jq -r '[.vulnerabilities[] | select(.severity == "critical")] | length' snyk-report.json)
+          HIGH=$(jq -r '[.vulnerabilities[] | select(.severity == "high")] | length' snyk-report.json)
+          MEDIUM=$(jq -r '[.vulnerabilities[] | select(.severity == "medium")] | length' snyk-report.json)
+          LOW=$(jq -r '[.vulnerabilities[] | select(.severity == "low")] | length' snyk-report.json)
+          BASE=$(jq -r '.docker.baseImage // "unknown"' snyk-report.json)
           
-          # Output for summary
           echo "vulnerabilities=$VULNERABILITIES" >> $GITHUB_OUTPUT
           echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
           echo "high=$HIGH" >> $GITHUB_OUTPUT
           echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
           echo "low=$LOW" >> $GITHUB_OUTPUT
-          echo "base_image=$BASE_IMAGE" >> $GITHUB_OUTPUT
+          echo "base_image=$BASE" >> $GITHUB_OUTPUT
           
-          # Display results
-          echo "📊 Container Scan Results:"
-          echo "  Base Image: $BASE_IMAGE"
-          echo "  Critical: $CRITICAL"
-          echo "  High: $HIGH"
-          echo "  Medium: $MEDIUM"
-          echo "  Low: $LOW"
-          echo "  Total: $VULNERABILITIES"
+          echo "📊 Results: Critical=$CRITICAL High=$HIGH Medium=$MEDIUM Low=$LOW"
           
-          # Fail if critical vulnerabilities found
           if [ "$CRITICAL" -gt 0 ]; then
-            echo "❌ CRITICAL vulnerabilities found! Blocking deployment."
-            echo "📄 See detailed report in artifacts"
+            echo "❌ CRITICAL vulnerabilities found!"
             exit 1
           fi
           
-          if [ "$HIGH" -gt 0 ]; then
-            echo "⚠️  HIGH severity vulnerabilities found, but continuing..."
-          else
-            echo "✅ No critical or high vulnerabilities found"
-          fi
+          echo "✅ Scan passed"
 
-      - name: Upload Snyk report
+      - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: snyk-container-report
-          path: snyk-container-report.json
+          name: snyk-report
+          path: snyk-report.json
           retention-days: 30
 
-      - name: Create security summary
-        if: always()
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## 🔒 Container Security Scan
-          
-          **Image:** `${{ steps.load.outputs.image }}`
-          **Base Image:** `${{ steps.snyk-scan.outputs.base_image }}`
-          
-          | Severity | Count |
-          |----------|-------|
-          | 🔴 Critical | ${{ steps.snyk-scan.outputs.critical }} |
-          | 🟠 High | ${{ steps.snyk-scan.outputs.high }} |
-          | 🟡 Medium | ${{ steps.snyk-scan.outputs.medium }} |
-          | 🟢 Low | ${{ steps.snyk-scan.outputs.low }} |
-          | **Total** | **${{ steps.snyk-scan.outputs.vulnerabilities }}** |
-          
-          **Status:** ${{ steps.snyk-scan.outputs.critical == '0' && '✅ Passed' || '❌ Failed' }}
-          EOF
-
   # ═══════════════════════════════════════════════════════════
-  # JOB 4: Push to JFrog Registry
-  # Only runs if security scan passes
+  # JOB 4: Push to Registry
   # ═══════════════════════════════════════════════════════════
   push-to-registry:
     name: Push to JFrog
@@ -300,101 +215,33 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Download Docker image
+      - name: Download image
         uses: actions/download-artifact@v4
         with:
           name: docker-image
 
-      - name: Load Docker image
+      - name: Load image
         id: load
         run: |
-          echo "📦 Loading Docker image..."
           docker load -i taskmaster-image.tar
-          IMAGE_NAME=$(docker images --format "{{.Repository}}:{{.Tag}load.outputs.version }}
-          docker push ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
-          echo "✅ Docker image pushed successfully"
+          IMAGE=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep taskmaster | head -1)
+          VERSION=$(echo "$IMAGE" | cut -d: -f2)
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Loaded: $IMAGE"
 
-      - name: Get image info
-        id: image-info
+      - name: Tag for registry
         run: |
-          IMAGE_SIZE=$(docker images "${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.load.outputs.version }}" --format "{{.Size}}")
-          echo "size=$IMAGE_SIZE" >> $GITHUB_OUTPUT
+          docker tag ${{ steps.load.outputs.image }} ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.load.outputs.version }}
+          docker tag ${{ steps.load.outputs.image }} ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
 
-      - name: Create deployment summary
+      - name: Login to JFrog
         run: |
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## 🚀 Docker Image Deployed
-          
-          **Version:** `${{ steps.load.outputs.version }}`
-          **Registry:** `${{ env.DOCKER_REGISTRY }}`
-          **Size:** `${{ steps.image-info.outputs.size }}`
-          **Tags:** `${{ steps.load.outputs.version }}`, `latest`
-          
-          ### Pull & Run Commands
-          ```bash
-          # Pull image
-          docker pull ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.load.outputs.version }}
-          
-          # Run container
-          docker run -p 8080:8080 ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
-          ```
-          
-          [View in JFrog](${{ secrets.JFROG_URL
-          retention-days: 30
-
-      - name: Login to JFrog Docker Registry
-        run: |
-          echo "🔐 Logging into JFrog Docker Registry..."
           echo "${{ secrets.JFROG_ACCESS_TOKEN }}" | docker login ${{ env.DOCKER_REGISTRY }} \
-            -u ${{ secrets.JFROG_USERNAME }} \
-            --password-stdin
-          echo "✅ Logged in successfully"
+            -u ${{ secrets.JFROG_USERNAME }} --password-stdin
 
-      - name: Push Docker image to JFrog
+      - name: Push to JFrog
         run: |
-          echo "📤 Pushing Docker image to JFrog..."
-          docker push ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.version.outputs.version }}
+          docker push ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.load.outputs.version }}
           docker push ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
-          echo "✅ Docker image pushed successfully"
-
-      - name: Docker image info
-        id: docker-info
-        run: |
-          IMAGE_SIZE=$(docker images ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.version.outputs.version }} --format "{{.Size}}")
-          echo "size=$IMAGE_SIZE" >> $GITHUB_OUTPUT
-          echo "📊 Image size: $IMAGE_SIZE"
-
-      - name: Create deployment summary
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## 📦 Deployment Successful
-          
-          **Version:** `${{ steps.version.outputs.version }}` | **Build:** `#${{ steps.build-info.outputs.build_number }}` | **Commit:** `${{ steps.build-info.outputs.commit_short }}`
-          
-          ### JAR Artifact
-          - **Repository:** `taskmaster-maven-local`
-          - **Type:** ${{ contains(steps.version.outputs.version, 'SNAPSHOT') && 'Snapshot' || 'Release' }}
-          
-          ### Docker Image
-          - **Registry:** `${{ env.DOCKER_REGISTRY }}`
-          - **Image:** `taskmaster:${{ steps.version.outputs.version }}`
-          - **Size:** `${{ steps.docker-info.outputs.size }}`
-          - **Tags:** `${{ steps.version.outputs.version }}`, `latest`
-          
-          ### Security Scan
-          - **Base Image:** `${{ steps.snyk-container.outputs.base_image }}`
-          - **Critical:** ${{ steps.snyk-container.outputs.critical }} | **High:** ${{ steps.snyk-container.outputs.high }} | **Medium:** ${{ steps.snyk-container.outputs.medium }} | **Low:** ${{ steps.snyk-container.outputs.low }}
-          - **Total Vulnerabilities:** ${{ steps.snyk-container.outputs.vulnerabilities }}
-          
-          **Pull command:**
-          ```bash
-          docker pull ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.version.outputs.version }}
-          ```
-          
-          **Run command:**
-          ```bash
-          docker run -p 8080:8080 ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
-          ```
-          
-          [View in JFrog](${{ secrets.JFROG_URL }}) • [Commit](${{ github.server_url }}/${{ github.repository }}/commit/${{ steps.build-info.outputs.commit_sha }})
-          EOF
+          echo "✅ Pushed to JFrog"
