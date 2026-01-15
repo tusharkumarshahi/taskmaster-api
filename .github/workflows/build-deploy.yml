@@ -5,6 +5,10 @@ on:
     branches:
       - main
       - develop
+  pull_request:
+    branches:
+      - main
+      - develop
   workflow_dispatch:  # Manual trigger
 
 env:
@@ -336,6 +340,7 @@ jobs:
     name: Push to JFrog
     needs: [build-docker-image, security-scan]
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')  # Only push on merge to main/develop
     
     steps:
       - name: Download image
