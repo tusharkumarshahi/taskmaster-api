@@ -124,6 +124,39 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: application-jar
+          path: target/taskmaster-*.jar
+          retention-days: 1
+
+  # ═══════════════════════════════════════════════════════════
+  # JOB 2: Build Docker Image
+  # ═══════════════════════════════════════════════════════════
+  build-docker-image:
+    name: Build Docker Image
+    needs: build-and-deploy-jar
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: application-jar
+          path: target/
+
+      - name: Extract version from filename
+        id: version
+        run: |
+          JAR_FILE=$(ls target/taskmaster-*.jar | head -1)
+          VERSION=$(basename "$JAR_FILE" | sed 's/taskmaster-//;s/.jar//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Version: $VERSION"
+
+      - name: Build Docker image
+        run: |
+          echo "🐳 Building Docker image..."
+          docker build -t taskmaster:${{ steps.version.outputs.version }} .
           echo "✅ Docker image built successfully"
 
       - name: Save Docker image
