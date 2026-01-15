@@ -198,6 +198,129 @@ jobs:
           
           echo "✅ Scan passed"
 
+      - name: Extract top vulnerabilities
+        id: top-vulns
+        if: always()
+        run: |
+          # Extract top 5 HIGH or CRITICAL vulnerabilities
+          TOP_VULNS=$(jq -r '
+            [.vulnerabilities[] | 
+            select(.severity == "critical" or .severity == "high") |
+            {
+              id: .id,
+              title: .title,
+              severity: .severity,
+              package: .packageName,
+              version: .version,
+              fixedIn: (.fixedIn // [] | join(", ")),
+              cvssScore: (.cvssScore // "N/A"),
+              url: .url
+            }] |
+            sort_by(.cvssScore) | reverse |
+            .[0:5] |
+            map(
+              "**\(.id)** (CVSS: \(.cvssScore)) - \(.severity | ascii_upcase)\n" +
+              "Package: `\(.package)@\(.version)`" +
+              (if .fixedIn != "" then " → Fix: Upgrade to `\(.fixedIn)`" else " → No fix available" end) + "\n" +
+              "[\(.title)](\(.url))"
+            ) |
+            join("\n\n")
+          ' snyk-report.json)
+          
+          # Save to file for multi-line output
+          echo "$TOP_VULNS" > top-vulns.txt
+          
+          # Set output flag
+          if [ -s top-vulns.txt ]; then
+            echo "has_vulns=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_vulns=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            const critical = '${{ steps.snyk-scan.outputs.critical }}';
+            const high = '${{ steps.snyk-scan.outputs.high }}';
+            const medium = '${{ steps.snyk-scan.outputs.medium }}';
+            const low = '${{ steps.snyk-scan.outputs.low }}';
+            const baseImage = '${{ steps.snyk-scan.outputs.base_image }}';
+            const hasVulns = '${{ steps.top-vulns.outputs.has_vulns }}' === 'true';
+            
+            let statusEmoji = '✅';
+            let statusText = 'Passed';
+            if (critical > 0) {
+              statusEmoji = '❌';
+              statusText = 'Failed - Critical vulnerabilities found';
+            } else if (high > 0) {
+              statusEmoji = '⚠️';
+              statusText = 'Warning - High severity vulnerabilities found';
+            }
+            
+            let comment = `## 🔒 Container Security Scan Results\n\n`;
+            comment += `**Status:** ${statusEmoji} ${statusText}\n`;
+            comment += `**Base Image:** \`${baseImage}\`\n\n`;
+            
+            comment += `### Summary\n`;
+            comment += `| Severity | Count |\n`;
+            comment += `|----------|-------|\n`;
+            comment += `| 🔴 Critical | ${critical} |\n`;
+            comment += `| 🟠 High | ${high} |\n`;
+            comment += `| 🟡 Medium | ${medium} |\n`;
+            comment += `| 🟢 Low | ${low} |\n`;
+            comment += `| **Total** | **${parseInt(critical) + parseInt(high) + parseInt(medium) + parseInt(low)}** |\n\n`;
+            
+            if (hasVulns && (critical > 0 || high > 0)) {
+              const topVulns = fs.readFileSync('top-vulns.txt', 'utf8').trim();
+              comment += `### Top 5 Vulnerabilities\n\n`;
+              comment += topVulns + '\n\n';
+              
+              if (parseInt(critical) + parseInt(high) > 5) {
+                comment += `<details>\n`;
+                comment += `<summary>📄 View all ${parseInt(critical) + parseInt(high)} vulnerabilities</summary>\n\n`;
+                comment += `Download the [full Snyk report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) from workflow artifacts.\n`;
+                comment += `</details>\n\n`;
+              }
+            }
+            
+            comment += `---\n`;
+            comment += `📄 [Download detailed report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) • `;
+            comment += `🔍 [View workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n`;
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('🔒 Container Security Scan Results')
+            );
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
