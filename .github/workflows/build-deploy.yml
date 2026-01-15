@@ -11,6 +11,11 @@ on:
       - develop
   workflow_dispatch:  # Manual trigger
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
 env:
   JAVA_VERSION: '21'
   MAVEN_OPTS: -Xmx1024m
