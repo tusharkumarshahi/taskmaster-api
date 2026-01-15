@@ -13,8 +13,11 @@ env:
   DOCKER_REGISTRY: ${{ secrets.JFROG_DOCKER_REGISTRY }}  # e.g., yourserver.jfrog.io/taskmaster-docker
 
 jobs:
-  build-and-deploy:
-    name: Build & Deploy Artifacts
+  # ═══════════════════════════════════════════════════════════
+  # JOB 1: Build & Deploy JAR
+  # ═══════════════════════════════════════════════════════════
+  build-and-deploy-jar:
+    name: Build & Deploy JAR
     runs-on: ubuntu-latest
     
     steps:
@@ -117,38 +120,74 @@ jobs:
           echo "📍 Repository: $REPO_PATH"
           echo "🔗 URL: $ARTIFACT_URL"
 
-      - name: Build Docker image
-        run: |
-          echo "🐳 Building Docker image..."
-          docker build -t taskmaster:${{ steps.version.outputs.version }} .
-          docker tag taskmaster:${{ steps.version.outputs.version }} \
-            ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.version.outputs.version }}
-          docker tag taskmaster:${{ steps.version.outputs.version }} \
-            ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
+      - name: Upload JAR for Docker build
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-jar
           echo "✅ Docker image built successfully"
 
-      - name: Install Snyk CLI
+      - name: Save Docker image
         run: |
-          echo "📦 Installing Snyk CLI..."
-          npm install -g snyk
-          snyk --version
+          echo "💾 Saving Docker image..."
+          docker save taskmaster:${{ steps.version.outputs.version }} -o taskmaster-image.tar
+          echo "✅ Image saved"
 
-      - name: Authenticate with Snyk
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: taskmaster-image.tar
+          retention-days: 1
+
+  # ═══════════════════════════════════════════════════════════
+  # JOB 3: Security Scan (Snyk Container)
+  # ═══════════════════════════════════════════════════════════
+  security-scan:
+    name: Container Security Scan
+    needs: build-docker-image
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        id: load
         run: |
-          snyk auth $SNYK_TOKEN
-          echo "✅ Authenticated with Snyk"
+          echo "📦 Loading Docker image..."
+          docker load -i taskmaster-image.tar
+          IMAGE_NAME=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep taskmaster | head -1)
+          echo "image=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "✅ Loaded: $IMAGE_NAME
+  # ═══════════════════════════════════════════════════════════
+  build-docker-image:
+    name: Build Docker Image
+    needs: build-and-deploy-jar
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Scan Docker image with Snyk
-        id: snyk-container
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: application-jar
+          path: target/
+
+      - name: Extscan
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           echo "🔍 Scanning Docker image for vulnerabilities..."
           
+          # Install jq for JSON parsing
+          sudo apt-get update -qq && sudo apt-get install -y jq
+          
           # Run Snyk container test and capture results
-          snyk container test taskmaster:${{ steps.version.outputs.version }} \
+          snyk container test ${{ steps.load.outputs.image }} \
             --json \
             --severity-threshold=high \
             > snyk-container-report.json || true
@@ -180,8 +219,8 @@ jobs:
           
           # Fail if critical vulnerabilities found
           if [ "$CRITICAL" -gt 0 ]; then
-            echo "❌ CRITICAL vulnerabilities found! Build failed."
-            echo "📄 See detailed report in snyk-container-report.json"
+            echo "❌ CRITICAL vulnerabilities found! Blocking deployment."
+            echo "📄 See detailed report in artifacts"
             exit 1
           fi
           
@@ -191,12 +230,84 @@ jobs:
             echo "✅ No critical or high vulnerabilities found"
           fi
 
-      - name: Upload Snyk container report
+      - name: Upload Snyk report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: snyk-container-report-${{ steps.version.outputs.version }}
+          name: snyk-container-report
           path: snyk-container-report.json
+          retention-days: 30
+
+      - name: Create security summary
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 🔒 Container Security Scan
+          
+          **Image:** `${{ steps.load.outputs.image }}`
+          **Base Image:** `${{ steps.snyk-scan.outputs.base_image }}`
+          
+          | Severity | Count |
+          |----------|-------|
+          | 🔴 Critical | ${{ steps.snyk-scan.outputs.critical }} |
+          | 🟠 High | ${{ steps.snyk-scan.outputs.high }} |
+          | 🟡 Medium | ${{ steps.snyk-scan.outputs.medium }} |
+          | 🟢 Low | ${{ steps.snyk-scan.outputs.low }} |
+          | **Total** | **${{ steps.snyk-scan.outputs.vulnerabilities }}** |
+          
+          **Status:** ${{ steps.snyk-scan.outputs.critical == '0' && '✅ Passed' || '❌ Failed' }}
+          EOF
+
+  # ═══════════════════════════════════════════════════════════
+  # JOB 4: Push to JFrog Registry
+  # Only runs if security scan passes
+  # ═══════════════════════════════════════════════════════════
+  push-to-registry:
+    name: Push to JFrog
+    needs: [build-docker-image, security-scan]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        id: load
+        run: |
+          echo "📦 Loading Docker image..."
+          docker load -i taskmaster-image.tar
+          IMAGE_NAME=$(docker images --format "{{.Repository}}:{{.Tag}load.outputs.version }}
+          docker push ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
+          echo "✅ Docker image pushed successfully"
+
+      - name: Get image info
+        id: image-info
+        run: |
+          IMAGE_SIZE=$(docker images ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.load.outputs.version }} --format "{{.Size}}")
+          echo "size=$IMAGE_SIZE" >> $GITHUB_OUTPUT
+
+      - name: Create deployment summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 🚀 Docker Image Deployed
+          
+          **Version:** `${{ steps.load.outputs.version }}`
+          **Registry:** `${{ env.DOCKER_REGISTRY }}`
+          **Size:** `${{ steps.image-info.outputs.size }}`
+          **Tags:** `${{ steps.load.outputs.version }}`, `latest`
+          
+          ### Pull & Run Commands
+          ```bash
+          # Pull image
+          docker pull ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.load.outputs.version }}
+          
+          # Run container
+          docker run -p 8080:8080 ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
+          ```
+          
+          [View in JFrog](${{ secrets.JFROG_URL
           retention-days: 30
 
       - name: Login to JFrog Docker Registry
