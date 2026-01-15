@@ -35,22 +35,8 @@ jobs:
       - name: Run tests with coverage
         run: |
           echo "🧪 Running tests with JaCoCo coverage..."
-          mvn -B clean test --no-transfer-progress
-          echo "✅ Tests completed"
-
-      - name: Generate coverage report
-        run: |
-          echo "📊 Generating coverage report..."
-          mvn -B jacoco:report --no-transfer-progress
-
-      - name: Check coverage threshold
-        run: |
-          echo "🎯 Checking coverage threshold (70%)..."
-          mvn -B jacoco:check --no-transfer-progress || {
-            echo "❌ Coverage below 70% threshold"
-            exit 1
-          }
-          echo "✅ Coverage threshold met"
+          mvn -B clean verify --no-transfer-progress
+          echo "✅ Tests completed and coverage check passed"
 
       - name: Comment coverage on PR
         if: github.event_name == 'pull_request'
