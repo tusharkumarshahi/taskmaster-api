@@ -288,6 +288,55 @@ jobs:
           retention-days: 30
 
       # ─────────────────────────────────────────────────────────
+      # Extract top vulnerabilities for PR comment
+      # ─────────────────────────────────────────────────────────
+      - name: Extract top vulnerabilities
+        id: top-vulns
+        if: always()
+        run: |
+          # Extract top 5 CRITICAL or HIGH vulnerabilities
+          if [ -f snyk-report.json ] && [ -s snyk-report.json ]; then
+            if jq empty snyk-report.json 2>/dev/null; then
+              TOP_VULNS=$(jq -r '
+                [.vulnerabilities[]? | 
+                select(.severity == "critical" or .severity == "high") |
+                {
+                  id: (.identifiers.CVE[0] // .id),
+                  title: .title,
+                  severity: .severity,
+                  package: .packageName,
+                  version: .version,
+                  fixedIn: (.fixedIn // [] | join(", ")),
+                  cvssScore: (.cvssScore // "N/A"),
+                  exploitMaturity: (.exploitMaturity // "not-defined")
+                }] |
+                sort_by(.cvssScore) | reverse |
+                .[0:5] |
+                map(
+                  "**\(.id)** (CVSS: \(.cvssScore)) - \(.severity | ascii_upcase)\n" +
+                  "Package: `\(.package)@\(.version)`" +
+                  (if .fixedIn != "" then " → Fix: Upgrade to `\(.fixedIn)`" else " → No fix available yet" end) + "\n" +
+                  "Exploit Maturity: \(.exploitMaturity)\n" +
+                  "\(.title)"
+                ) |
+                join("\n\n")
+              ' snyk-report.json)
+              
+              echo "$TOP_VULNS" > top-vulns.txt
+              
+              if [ -s top-vulns.txt ]; then
+                echo "has_vulns=true" >> $GITHUB_OUTPUT
+              else
+                echo "has_vulns=false" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "has_vulns=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "has_vulns=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ─────────────────────────────────────────────────────────
       # Comment Snyk results on PR
       # ─────────────────────────────────────────────────────────
       - name: Comment Snyk results on PR
@@ -295,77 +344,99 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('fs');
+            
             const critical = '${{ steps.snyk-test.outputs.critical }}' || '0';
             const high = '${{ steps.snyk-test.outputs.high }}' || '0';
             const medium = '${{ steps.snyk-test.outputs.medium }}' || '0';
             const low = '${{ steps.snyk-test.outputs.low }}' || '0';
             const total = '${{ steps.snyk-test.outputs.total }}' || '0';
-            const detailedVulns = `${{ steps.snyk-test.outputs.detailed_vulns }}`;
+            const hasVulns = '${{ steps.top-vulns.outputs.has_vulns }}' === 'true';
             
-            const hasIssues = parseInt(critical) > 0 || parseInt(high) > 0;
-            const statusEmoji = hasIssues ? '❌' : '✅';
-            const statusText = hasIssues ? 'FAILED - Action Required' : 'PASSED';
-            
-            let commentBody = `## 🛡️ Snyk Security Scan\n\n`;
-            commentBody += `### ${statusEmoji} Status: ${statusText}\n\n`;
-            
-            commentBody += `| Severity | Count |\n`;
-            commentBody += `|----------|-------|\n`;
-            commentBody += `| 🔴 Critical | **${critical}** |\n`;
-            commentBody += `| 🟠 High | **${high}** |\n`;
-            commentBody += `| 🟡 Medium | ${medium} |\n`;
-            commentBody += `| 🟢 Low | ${low} |\n`;
-            commentBody += `| **Total** | **${total}** |\n\n`;
-            
-            if (hasIssues) {
-              commentBody += `### ⚠️ Action Required\n\n`;
-              commentBody += `Critical or High severity vulnerabilities detected in your dependencies.\n\n`;
-              
-              // Add detailed vulnerability information if available
-              if (detailedVulns && detailedVulns.trim()) {
-                commentBody += `<details>\n<summary>📋 Top Critical/High Vulnerabilities (Click to expand)</summary>\n\n`;
-                commentBody += detailedVulns;
-                commentBody += `\n</details>\n\n`;
-              }
-              
-              commentBody += `**Next Steps:**\n`;
-              commentBody += `1. Review the [Snyk Dashboard](https://app.snyk.io) for detailed vulnerability information\n`;
-              commentBody += `2. Download the full security report from workflow artifacts (JSON + HTML)\n`;
-              commentBody += `3. Update vulnerable dependencies:\n`;
-              commentBody += `   \`\`\`bash\n`;
-              commentBody += `   mvn versions:display-dependency-updates\n`;
-              commentBody += `   # Update dependencies in pom.xml\n`;
-              commentBody += `   \`\`\`\n`;
-              commentBody += `4. Re-run this workflow to verify fixes\n\n`;
-            } else {
-              commentBody += `✅ No critical or high severity vulnerabilities detected.\n\n`;
-              if (parseInt(medium) > 0 || parseInt(low) > 0) {
-                commentBody += `ℹ️ ${medium} medium and ${low} low severity issues found. Consider addressing these in a follow-up PR.\n\n`;
-              }
+            let statusEmoji = '✅';
+            let statusText = 'Passed';
+            if (parseInt(critical) > 0) {
+              statusEmoji = '❌';
+              statusText = 'Failed - Critical vulnerabilities found';
+            } else if (parseInt(high) > 0) {
+              statusEmoji = '⚠️';
+              statusText = 'Warning - High severity vulnerabilities found';
             }
             
-            commentBody += `<details>\n`;
-            commentBody += `<summary>📚 About Snyk Security Scanning</summary>\n\n`;
-            commentBody += `Snyk scans your Maven dependencies (\`pom.xml\`) for known security vulnerabilities using:\n`;
-            commentBody += `- CVE database (Common Vulnerabilities and Exposures)\n`;
-            commentBody += `- Snyk's proprietary vulnerability database\n`;
-            commentBody += `- Real-time threat intelligence\n\n`;
-            commentBody += `**Severity Levels:**\n`;
-            commentBody += `- 🔴 **Critical**: Immediate action required\n`;
-            commentBody += `- 🟠 **High**: Should be fixed before merging\n`;
-            commentBody += `- 🟡 **Medium**: Fix in next sprint\n`;
-            commentBody += `- 🟢 **Low**: Address when convenient\n`;
-            commentBody += `</details>\n\n`;
+            let comment = `## 🛡️ Snyk Dependency Security Scan\n\n`;
+            comment += `**Status:** ${statusEmoji} ${statusText}\n\n`;
             
-            commentBody += `---\n`;
-            commentBody += `_🔍 Scanned with [Snyk](https://snyk.io) | Threshold: High/Critical_`;
+            comment += `### Summary\n`;
+            comment += `| Severity | Count |\n`;
+            comment += `|----------|-------|\n`;
+            comment += `| 🔴 Critical | ${critical} |\n`;
+            comment += `| 🟠 High | ${high} |\n`;
+            comment += `| 🟡 Medium | ${medium} |\n`;
+            comment += `| 🟢 Low | ${low} |\n`;
+            comment += `| **Total** | **${total}** |\n\n`;
             
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            if (hasVulns && (parseInt(critical) > 0 || parseInt(high) > 0)) {
+              let topVulns = '';
+              try {
+                topVulns = fs.readFileSync('top-vulns.txt', 'utf8').trim();
+              } catch (e) {
+                topVulns = '_Unable to load vulnerability details_';
+              }
+              
+              comment += `### Top 5 Vulnerabilities\n\n`;
+              comment += topVulns + '\n\n';
+              
+              if (parseInt(critical) + parseInt(high) > 5) {
+                comment += `<details>\n`;
+                comment += `<summary>📄 View all ${parseInt(critical) + parseInt(high)} vulnerabilities</summary>\n\n`;
+                comment += `Download the [full Snyk report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) from workflow artifacts.\n`;
+                comment += `</details>\n\n`;
+              }
+              
+              comment += `### 🔧 Next Steps\n`;
+              comment += `1. Review vulnerabilities above\n`;
+              comment += `2. Update dependencies in \`pom.xml\`\n`;
+              comment += `3. Run \`mvn versions:display-dependency-updates\` locally\n`;
+              comment += `4. Re-run workflow to verify fixes\n\n`;
+            } else if (parseInt(total) === 0) {
+              comment += `✅ No vulnerabilities detected in your dependencies.\n\n`;
+            } else {
+              comment += `ℹ️ ${medium} medium and ${low} low severity issues found. Consider addressing in a follow-up.\n\n`;
+            }
+            
+            comment += `---\n`;
+            comment += `📄 [Download detailed report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) • `;
+            comment += `🔍 [View workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n`;
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: commentBody
+              issue_number: context.issue.number,
             });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('🛡️ Snyk Dependency Security Scan')
+            );
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
 
       # ─────────────────────────────────────────────────────────
       # Add summary to workflow
