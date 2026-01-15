@@ -9,12 +9,54 @@ on:
 
 jobs:
   # ═══════════════════════════════════════════════════════════
-  # JOB 1: Checkstyle (Linting)
-  # Runs in parallel with Snyk
+  # JOB 1: Test & Coverage (MUST RUN FIRST)
+  # Fail-fast: If code doesn't compile or tests fail, stop here
+  # ═══════════════════════════════════════════════════════════
+  test-coverage:
+    name: Test & Coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run tests with coverage
+        run: |
+          echo "🧪 Running tests with JaCoCo coverage..."
+          mvn -B clean verify --no-transfer-progress
+          echo "✅ Tests completed and coverage check passed"
+
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: madrapps/jacoco-report@v1.6.1
+        with:
+          paths: ${{ github.workspace }}/target/site/jacoco/jacoco.xml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          min-coverage-overall: 70
+          min-coverage-changed-files: 70
+          title: '📊 Code Coverage Report'
+          update-comment: true
+
+  # ═══════════════════════════════════════════════════════════
+  # JOB 2: Checkstyle (Linting)
+  # Runs in parallel with Snyk after tests pass
   # ═══════════════════════════════════════════════════════════
   checkstyle:
     name: Checkstyle Analysis
     runs-on: ubuntu-latest
+    needs: test-coverage  # Wait for tests to pass
 
     steps:
       - name: Checkout code
@@ -40,12 +82,13 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   # ═══════════════════════════════════════════════════════════
-  # JOB 2: Snyk Security Scan (NEW!)
-  # Runs in parallel with Checkstyle
+  # JOB 3: Snyk Security Scan
+  # Runs in parallel with Checkstyle after tests pass
   # ═══════════════════════════════════════════════════════════
   snyk-security:
     name: Snyk Security Scan
     runs-on: ubuntu-latest
+    needs: test-coverage  # Wait for tests to pass
     permissions:
       contents: read
       pull-requests: write
@@ -101,17 +144,21 @@ jobs:
       - name: Run Snyk test on Maven dependencies
         id: snyk-test
         continue-on-error: true
+        env:
+          MAVEN_CMD: mvn
         run: |
           echo "🔍 Scanning Maven dependencies with Snyk..."
+          
+          # Remove Maven wrapper files to force Snyk to use system Maven
+          rm -f mvnw mvnw.cmd
+          echo "✅ Removed Maven wrapper files"
           
           # Debug: Show what Snyk detects
           echo "📋 Detecting project type..."
           snyk test --print-deps 2>&1 | head -20 || true
           
-          # Run Snyk test explicitly for Maven with package-manager flag
+          # Run Snyk test - it will use system Maven now
           snyk test \
-            --package-manager=maven \
-            --file=pom.xml \
             --json \
             > snyk-report.json 2>&1 || echo '{"ok": false, "vulnerabilities": []}' > snyk-report.json
           
@@ -122,8 +169,6 @@ jobs:
           # Also generate human-readable HTML report
           npm install -g snyk-to-html || true
           snyk test \
-            --package-manager=maven \
-            --file=pom.xml \
             --json \
             2>/dev/null | snyk-to-html -o snyk-report.html 2>/dev/null || echo "<!-- HTML report generation failed -->" > snyk-report.html
           
@@ -221,11 +266,11 @@ jobs:
       # ─────────────────────────────────────────────────────────
       - name: Monitor project with Snyk
         continue-on-error: true
+        env:
+          MAVEN_CMD: mvn
         run: |
           echo "📤 Sending results to Snyk dashboard..."
           snyk monitor \
-            --package-manager=maven \
-            --file=pom.xml \
             --project-name="${{ github.repository }}" \
             || echo "⚠️ Monitoring failed, but continuing..."
 
@@ -243,6 +288,55 @@ jobs:
           retention-days: 30
 
       # ─────────────────────────────────────────────────────────
+      # Extract top vulnerabilities for PR comment
+      # ─────────────────────────────────────────────────────────
+      - name: Extract top vulnerabilities
+        id: top-vulns
+        if: always()
+        run: |
+          # Extract top 5 CRITICAL or HIGH vulnerabilities
+          if [ -f snyk-report.json ] && [ -s snyk-report.json ]; then
+            if jq empty snyk-report.json 2>/dev/null; then
+              TOP_VULNS=$(jq -r '
+                [.vulnerabilities[]? | 
+                select(.severity == "critical" or .severity == "high") |
+                {
+                  id: (.identifiers.CVE[0] // .id),
+                  title: .title,
+                  severity: .severity,
+                  package: .packageName,
+                  version: .version,
+                  fixedIn: (.fixedIn // [] | join(", ")),
+                  cvssScore: (.cvssScore // "N/A"),
+                  exploitMaturity: (.exploitMaturity // "not-defined")
+                }] |
+                sort_by(.cvssScore) | reverse |
+                .[0:5] |
+                map(
+                  "**\(.id)** (CVSS: \(.cvssScore)) - \(.severity | ascii_upcase)\n" +
+                  "Package: `\(.package)@\(.version)`" +
+                  (if .fixedIn != "" then " → Fix: Upgrade to `\(.fixedIn)`" else " → No fix available yet" end) + "\n" +
+                  "Exploit Maturity: \(.exploitMaturity)\n" +
+                  "\(.title)"
+                ) |
+                join("\n\n")
+              ' snyk-report.json)
+              
+              echo "$TOP_VULNS" > top-vulns.txt
+              
+              if [ -s top-vulns.txt ]; then
+                echo "has_vulns=true" >> $GITHUB_OUTPUT
+              else
+                echo "has_vulns=false" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "has_vulns=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "has_vulns=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ─────────────────────────────────────────────────────────
       # Comment Snyk results on PR
       # ─────────────────────────────────────────────────────────
       - name: Comment Snyk results on PR
@@ -250,77 +344,99 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('fs');
+            
             const critical = '${{ steps.snyk-test.outputs.critical }}' || '0';
             const high = '${{ steps.snyk-test.outputs.high }}' || '0';
             const medium = '${{ steps.snyk-test.outputs.medium }}' || '0';
             const low = '${{ steps.snyk-test.outputs.low }}' || '0';
             const total = '${{ steps.snyk-test.outputs.total }}' || '0';
-            const detailedVulns = `${{ steps.snyk-test.outputs.detailed_vulns }}`;
+            const hasVulns = '${{ steps.top-vulns.outputs.has_vulns }}' === 'true';
             
-            const hasIssues = parseInt(critical) > 0 || parseInt(high) > 0;
-            const statusEmoji = hasIssues ? '❌' : '✅';
-            const statusText = hasIssues ? 'FAILED - Action Required' : 'PASSED';
-            
-            let commentBody = `## 🛡️ Snyk Security Scan\n\n`;
-            commentBody += `### ${statusEmoji} Status: ${statusText}\n\n`;
-            
-            commentBody += `| Severity | Count |\n`;
-            commentBody += `|----------|-------|\n`;
-            commentBody += `| 🔴 Critical | **${critical}** |\n`;
-            commentBody += `| 🟠 High | **${high}** |\n`;
-            commentBody += `| 🟡 Medium | ${medium} |\n`;
-            commentBody += `| 🟢 Low | ${low} |\n`;
-            commentBody += `| **Total** | **${total}** |\n\n`;
-            
-            if (hasIssues) {
-              commentBody += `### ⚠️ Action Required\n\n`;
-              commentBody += `Critical or High severity vulnerabilities detected in your dependencies.\n\n`;
-              
-              // Add detailed vulnerability information if available
-              if (detailedVulns && detailedVulns.trim()) {
-                commentBody += `<details>\n<summary>📋 Top Critical/High Vulnerabilities (Click to expand)</summary>\n\n`;
-                commentBody += detailedVulns;
-                commentBody += `\n</details>\n\n`;
-              }
-              
-              commentBody += `**Next Steps:**\n`;
-              commentBody += `1. Review the [Snyk Dashboard](https://app.snyk.io) for detailed vulnerability information\n`;
-              commentBody += `2. Download the full security report from workflow artifacts (JSON + HTML)\n`;
-              commentBody += `3. Update vulnerable dependencies:\n`;
-              commentBody += `   \`\`\`bash\n`;
-              commentBody += `   mvn versions:display-dependency-updates\n`;
-              commentBody += `   # Update dependencies in pom.xml\n`;
-              commentBody += `   \`\`\`\n`;
-              commentBody += `4. Re-run this workflow to verify fixes\n\n`;
-            } else {
-              commentBody += `✅ No critical or high severity vulnerabilities detected.\n\n`;
-              if (parseInt(medium) > 0 || parseInt(low) > 0) {
-                commentBody += `ℹ️ ${medium} medium and ${low} low severity issues found. Consider addressing these in a follow-up PR.\n\n`;
-              }
+            let statusEmoji = '✅';
+            let statusText = 'Passed';
+            if (parseInt(critical) > 0) {
+              statusEmoji = '❌';
+              statusText = 'Failed - Critical vulnerabilities found';
+            } else if (parseInt(high) > 0) {
+              statusEmoji = '⚠️';
+              statusText = 'Warning - High severity vulnerabilities found';
             }
             
-            commentBody += `<details>\n`;
-            commentBody += `<summary>📚 About Snyk Security Scanning</summary>\n\n`;
-            commentBody += `Snyk scans your Maven dependencies (\`pom.xml\`) for known security vulnerabilities using:\n`;
-            commentBody += `- CVE database (Common Vulnerabilities and Exposures)\n`;
-            commentBody += `- Snyk's proprietary vulnerability database\n`;
-            commentBody += `- Real-time threat intelligence\n\n`;
-            commentBody += `**Severity Levels:**\n`;
-            commentBody += `- 🔴 **Critical**: Immediate action required\n`;
-            commentBody += `- 🟠 **High**: Should be fixed before merging\n`;
-            commentBody += `- 🟡 **Medium**: Fix in next sprint\n`;
-            commentBody += `- 🟢 **Low**: Address when convenient\n`;
-            commentBody += `</details>\n\n`;
+            let comment = `## 🛡️ Snyk Dependency Security Scan\n\n`;
+            comment += `**Status:** ${statusEmoji} ${statusText}\n\n`;
             
-            commentBody += `---\n`;
-            commentBody += `_🔍 Scanned with [Snyk](https://snyk.io) | Threshold: High/Critical_`;
+            comment += `### Summary\n`;
+            comment += `| Severity | Count |\n`;
+            comment += `|----------|-------|\n`;
+            comment += `| 🔴 Critical | ${critical} |\n`;
+            comment += `| 🟠 High | ${high} |\n`;
+            comment += `| 🟡 Medium | ${medium} |\n`;
+            comment += `| 🟢 Low | ${low} |\n`;
+            comment += `| **Total** | **${total}** |\n\n`;
             
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            if (hasVulns && (parseInt(critical) > 0 || parseInt(high) > 0)) {
+              let topVulns = '';
+              try {
+                topVulns = fs.readFileSync('top-vulns.txt', 'utf8').trim();
+              } catch (e) {
+                topVulns = '_Unable to load vulnerability details_';
+              }
+              
+              comment += `### Top 5 Vulnerabilities\n\n`;
+              comment += topVulns + '\n\n';
+              
+              if (parseInt(critical) + parseInt(high) > 5) {
+                comment += `<details>\n`;
+                comment += `<summary>📄 View all ${parseInt(critical) + parseInt(high)} vulnerabilities</summary>\n\n`;
+                comment += `Download the [full Snyk report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) from workflow artifacts.\n`;
+                comment += `</details>\n\n`;
+              }
+              
+              comment += `### 🔧 Next Steps\n`;
+              comment += `1. Review vulnerabilities above\n`;
+              comment += `2. Update dependencies in \`pom.xml\`\n`;
+              comment += `3. Run \`mvn versions:display-dependency-updates\` locally\n`;
+              comment += `4. Re-run workflow to verify fixes\n\n`;
+            } else if (parseInt(total) === 0) {
+              comment += `✅ No vulnerabilities detected in your dependencies.\n\n`;
+            } else {
+              comment += `ℹ️ ${medium} medium and ${low} low severity issues found. Consider addressing in a follow-up.\n\n`;
+            }
+            
+            comment += `---\n`;
+            comment += `📄 [Download detailed report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) • `;
+            comment += `🔍 [View workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n`;
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: commentBody
+              issue_number: context.issue.number,
             });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('🛡️ Snyk Dependency Security Scan')
+            );
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
 
       # ─────────────────────────────────────────────────────────
       # Add summary to workflow
@@ -346,191 +462,12 @@ jobs:
           fi
 
   # ═══════════════════════════════════════════════════════════
-  # JOB 3: Test & Coverage
-  # Only runs if both Checkstyle AND Snyk pass
-  # ═══════════════════════════════════════════════════════════
-  test-coverage:
-    name: Test & Coverage
-    needs: [checkstyle, snyk-security]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-          cache: 'maven'
-      
-      - name: Run tests with coverage
-        id: test
-        run: |
-          echo "🧪 Running tests with code coverage..."
-          mvn clean test jacoco:report verify --batch-mode
-      
-      - name: Calculate coverage from JaCoCo XML
-        id: coverage
-        run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📊 Calculating Code Coverage"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
-          COVERAGE_REPORT="target/site/jacoco/jacoco.xml"
-          
-          if [ ! -f "$COVERAGE_REPORT" ]; then
-            echo "❌ Coverage report not found at $COVERAGE_REPORT"
-            exit 1
-          fi
-          
-          MISSED=$(grep -oP '<counter type="LINE".*?missed="\K[0-9]+' "$COVERAGE_REPORT" | tail -1)
-          COVERED=$(grep -oP '<counter type="LINE".*?covered="\K[0-9]+' "$COVERAGE_REPORT" | tail -1)
-          
-          TOTAL=$((MISSED + COVERED))
-          
-          if [ $TOTAL -eq 0 ]; then
-            PERCENTAGE=0
-            echo "⚠️  No code to analyze"
-          else
-            PERCENTAGE=$(awk "BEGIN {printf \"%.2f\", ($COVERED / $TOTAL) * 100}")
-          fi
-          
-          THRESHOLD=70
-          
-          if (( $(echo "$PERCENTAGE >= 80" | bc -l) )); then
-            STATUS_EMOJI="✅"
-            STATUS_TEXT="Excellent"
-            STATUS_COLOR="🟢"
-          elif (( $(echo "$PERCENTAGE >= 60" | bc -l) )); then
-            STATUS_EMOJI="📊"
-            STATUS_TEXT="Good"
-            STATUS_COLOR="🟡"
-          elif (( $(echo "$PERCENTAGE >= 40" | bc -l) )); then
-            STATUS_EMOJI="⚠️"
-            STATUS_TEXT="Needs Improvement"
-            STATUS_COLOR="🟠"
-          else
-            STATUS_EMOJI="❌"
-            STATUS_TEXT="Poor"
-            STATUS_COLOR="🔴"
-          fi
-          
-          echo ""
-          echo "📈 Coverage Metrics:"
-          echo "  Lines Covered:    $COVERED"
-          echo "  Lines Missed:     $MISSED"
-          echo "  Total Lines:      $TOTAL"
-          echo "  Coverage:         $PERCENTAGE%"
-          echo ""
-          echo "$STATUS_COLOR Status: $STATUS_TEXT ($STATUS_EMOJI)"
-          echo "  Threshold:        $THRESHOLD%"
-          
-          if (( $(echo "$PERCENTAGE >= $THRESHOLD" | bc -l) )); then
-            echo "  Result:           ✅ Passed"
-            THRESHOLD_PASSED=true
-          else
-            echo "  Result:           ❌ Failed"
-            THRESHOLD_PASSED=false
-          fi
-          
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
-          echo "percentage=$PERCENTAGE" >> $GITHUB_OUTPUT
-          echo "covered=$COVERED" >> $GITHUB_OUTPUT
-          echo "missed=$MISSED" >> $GITHUB_OUTPUT
-          echo "total=$TOTAL" >> $GITHUB_OUTPUT
-          echo "status_emoji=$STATUS_EMOJI" >> $GITHUB_OUTPUT
-          echo "status_text=$STATUS_TEXT" >> $GITHUB_OUTPUT
-          echo "threshold_passed=$THRESHOLD_PASSED" >> $GITHUB_OUTPUT
-      
-      - name: Generate coverage badge
-        uses: cicirello/jacoco-badge-generator@v2
-        with:
-          jacoco-csv-file: target/site/jacoco/jacoco.csv
-          badges-directory: .github/badges
-          generate-branches-badge: true
-          generate-coverage-badge: true
-      
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: target/site/jacoco/
-          retention-days: 7
-      
-      - name: Comment coverage on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const covered = '${{ steps.coverage.outputs.covered }}';
-            const missed = '${{ steps.coverage.outputs.missed }}';
-            const total = '${{ steps.coverage.outputs.total }}';
-            const percentage = '${{ steps.coverage.outputs.percentage }}';
-            const statusEmoji = '${{ steps.coverage.outputs.status_emoji }}';
-            const statusText = '${{ steps.coverage.outputs.status_text }}';
-            
-            let commentBody = `## 📊 Code Coverage Report\n\n`;
-            commentBody += `### ${statusEmoji} Coverage: ${percentage}% - ${statusText}\n\n`;
-            commentBody += `| Metric | Value |\n`;
-            commentBody += `|--------|-------|\n`;
-            commentBody += `| **Coverage** | **${percentage}%** |\n`;
-            commentBody += `| Lines Covered | ${covered} |\n`;
-            commentBody += `| Lines Missed | ${missed} |\n`;
-            commentBody += `| Total Lines | ${total} |\n`;
-            commentBody += `| Threshold | 70% |\n`;
-            commentBody += `| Status | ${'${{ steps.coverage.outputs.threshold_passed }}' === 'true' ? '✅ Passed' : '❌ Failed'} |\n\n`;
-            
-            commentBody += `<details>\n`;
-            commentBody += `<summary>📈 Coverage Guidelines</summary>\n\n`;
-            commentBody += `| Coverage | Status | Description |\n`;
-            commentBody += `|----------|--------|-------------|\n`;
-            commentBody += `| 80%+ | 🟢 Excellent | Well-tested code |\n`;
-            commentBody += `| 60-80% | 🟡 Good | Acceptable coverage |\n`;
-            commentBody += `| 40-60% | 🟠 Fair | Needs improvement |\n`;
-            commentBody += `| <40% | 🔴 Poor | Insufficient testing |\n`;
-            commentBody += `</details>\n\n`;
-            commentBody += `---\n`;
-            commentBody += `_Coverage calculated using JaCoCo_`;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: commentBody
-            });
-      
-      - name: Display coverage summary
-        run: |
-          echo "## 📊 Code Coverage Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Coverage:** ${{ steps.coverage.outputs.percentage }}% ${{ steps.coverage.outputs.status_emoji }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Status:** ${{ steps.coverage.outputs.status_text }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Lines Covered | ${{ steps.coverage.outputs.covered }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Lines Missed | ${{ steps.coverage.outputs.missed }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Total Lines | ${{ steps.coverage.outputs.total }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Coverage %** | **${{ steps.coverage.outputs.percentage }}%** |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Threshold:** 70%" >> $GITHUB_STEP_SUMMARY
-          echo "**Result:** ${{ steps.coverage.outputs.threshold_passed == 'true' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
-
-  # ═══════════════════════════════════════════════════════════
   # JOB 4: SonarQube Analysis
-  # Only runs if all previous checks pass
+  # Runs after all quality and security checks pass
   # ═══════════════════════════════════════════════════════════
   sonar-quality:
     name: SonarQube Analysis
-    needs: test-coverage
+    needs: [test-coverage, checkstyle, snyk-security]
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -14,7 +14,7 @@
 
     <groupId>com.example</groupId>
     <artifactId>taskmaster</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>1.0.0</version>
     <name>Taskmaster</name>
     <description>Task Management REST API</description>
 
@@ -23,6 +23,19 @@
         <checkstyle.config.location>google_checks.xml</checkstyle.config.location>
         <lombok.version>1.18.30</lombok.version>
     </properties>
+
+    <distributionManagement>
+        <repository>
+            <id>jfrog-artifactory</id>
+            <name>JFrog Artifactory - Local Repository</name>
+            <url>${env.JFROG_URL}/taskmaster-maven-local</url>
+        </repository>
+        <snapshotRepository>
+            <id>jfrog-artifactory</id>
+            <name>JFrog Artifactory - Local Repository</name>
+            <url>${env.JFROG_URL}/taskmaster-maven-local</url>
+        </snapshotRepository>
+    </distributionManagement>
 
     <dependencies>
         <!-- Spring Boot Starters -->

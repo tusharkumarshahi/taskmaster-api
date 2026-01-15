@@ -1,0 +1,370 @@
+name: Build & Deploy to JFrog
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:  # Manual trigger
+
+env:
+  JAVA_VERSION: '21'
+  MAVEN_OPTS: -Xmx1024m
+  DOCKER_REGISTRY: ${{ secrets.JFROG_DOCKER_REGISTRY }}
+
+jobs:
+  # ═══════════════════════════════════════════════════════════
+  # JOB 1: Build & Deploy JAR
+  # ═══════════════════════════════════════════════════════════
+  build-and-deploy-jar:
+    name: Build & Deploy JAR
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Extract version from pom.xml
+        id: version
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Building version: $VERSION"
+
+      - name: Build with Maven
+        run: |
+          echo "🔨 Building project..."
+          mvn -B clean package -DskipTests
+          echo "✅ Build completed"
+
+      - name: Run tests
+        run: |
+          echo "🧪 Running tests..."
+          mvn -B test
+          echo "✅ Tests passed"
+
+      - name: Create settings.xml with JFrog credentials
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << 'EOF'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                                        https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <servers>
+              <server>
+                <id>jfrog-artifactory</id>
+                <username>${{ secrets.JFROG_USERNAME }}</username>
+                <password>${{ secrets.JFROG_ACCESS_TOKEN }}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+          echo "✅ Maven settings configured"
+
+      - name: Deploy to JFrog Artifactory
+        env:
+          JFROG_URL: ${{ secrets.JFROG_URL }}
+        run: |
+          echo "🚀 Deploying JAR to JFrog..."
+          mvn -B deploy -DskipTests
+          echo "✅ JAR deployed to taskmaster-maven-local"
+
+      - name: Upload JAR for Docker build
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-jar
+          path: target/taskmaster-*.jar
+          retention-days: 1
+
+  # ═══════════════════════════════════════════════════════════
+  # JOB 2: Build Docker Image
+  # ═══════════════════════════════════════════════════════════
+  build-docker-image:
+    name: Build Docker Image
+    needs: build-and-deploy-jar
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: application-jar
+          path: target/
+
+      - name: Extract version
+        id: version
+        run: |
+          JAR_FILE=$(ls target/taskmaster-*.jar | head -1)
+          VERSION=$(basename "$JAR_FILE" | sed 's/taskmaster-//;s/.jar//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Version: $VERSION"
+
+      - name: Build Docker image
+        run: |
+          echo "🐳 Building Docker image..."
+          docker build -t taskmaster:${{ steps.version.outputs.version }} .
+          echo "✅ Image built"
+
+      - name: Save Docker image
+        run: |
+          docker save taskmaster:${{ steps.version.outputs.version }} -o taskmaster-image.tar
+          echo "✅ Image saved"
+
+      - name: Upload Docker image
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: taskmaster-image.tar
+          retention-days: 1
+
+  # ═══════════════════════════════════════════════════════════
+  # JOB 3: Security Scan
+  # ═══════════════════════════════════════════════════════════
+  security-scan:
+    name: Container Security Scan
+    needs: build-docker-image
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        id: load
+        run: |
+          docker load -i taskmaster-image.tar
+          IMAGE_NAME=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep taskmaster | head -1)
+          echo "image=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "✅ Loaded: $IMAGE_NAME"
+
+      - name: Install Snyk CLI
+        run: |
+          npm install -g snyk
+          snyk --version
+
+      - name: Authenticate with Snyk
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk auth $SNYK_TOKEN
+          echo "✅ Authenticated"
+
+      - name: Scan with Snyk
+        id: snyk-scan
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          echo "🔍 Scanning image..."
+          sudo apt-get update -qq && sudo apt-get install -y jq
+          
+          snyk container test ${{ steps.load.outputs.image }} \
+            --json --severity-threshold=high > snyk-report.json || true
+          
+          VULNERABILITIES=$(jq -r '.uniqueCount // 0' snyk-report.json)
+          CRITICAL=$(jq -r '[.vulnerabilities[] | select(.severity == "critical")] | length' snyk-report.json)
+          HIGH=$(jq -r '[.vulnerabilities[] | select(.severity == "high")] | length' snyk-report.json)
+          MEDIUM=$(jq -r '[.vulnerabilities[] | select(.severity == "medium")] | length' snyk-report.json)
+          LOW=$(jq -r '[.vulnerabilities[] | select(.severity == "low")] | length' snyk-report.json)
+          BASE=$(jq -r '.docker.baseImage // "unknown"' snyk-report.json)
+          
+          echo "vulnerabilities=$VULNERABILITIES" >> $GITHUB_OUTPUT
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high=$HIGH" >> $GITHUB_OUTPUT
+          echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
+          echo "low=$LOW" >> $GITHUB_OUTPUT
+          echo "base_image=$BASE" >> $GITHUB_OUTPUT
+          
+          echo "📊 Results: Critical=$CRITICAL High=$HIGH Medium=$MEDIUM Low=$LOW"
+          
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "❌ CRITICAL vulnerabilities found!"
+            exit 1
+          fi
+          
+          echo "✅ Scan passed"
+
+      - name: Extract top vulnerabilities
+        id: top-vulns
+        if: always()
+        run: |
+          # Extract top 5 HIGH or CRITICAL vulnerabilities
+          TOP_VULNS=$(jq -r '
+            [.vulnerabilities[] | 
+            select(.severity == "critical" or .severity == "high") |
+            {
+              id: .id,
+              title: .title,
+              severity: .severity,
+              package: .packageName,
+              version: .version,
+              fixedIn: (.fixedIn // [] | join(", ")),
+              cvssScore: (.cvssScore // "N/A"),
+              url: .url
+            }] |
+            sort_by(.cvssScore) | reverse |
+            .[0:5] |
+            map(
+              "**\(.id)** (CVSS: \(.cvssScore)) - \(.severity | ascii_upcase)\n" +
+              "Package: `\(.package)@\(.version)`" +
+              (if .fixedIn != "" then " → Fix: Upgrade to `\(.fixedIn)`" else " → No fix available" end) + "\n" +
+              "[\(.title)](\(.url))"
+            ) |
+            join("\n\n")
+          ' snyk-report.json)
+          
+          # Save to file for multi-line output
+          echo "$TOP_VULNS" > top-vulns.txt
+          
+          # Set output flag
+          if [ -s top-vulns.txt ]; then
+            echo "has_vulns=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_vulns=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            const critical = '${{ steps.snyk-scan.outputs.critical }}';
+            const high = '${{ steps.snyk-scan.outputs.high }}';
+            const medium = '${{ steps.snyk-scan.outputs.medium }}';
+            const low = '${{ steps.snyk-scan.outputs.low }}';
+            const baseImage = '${{ steps.snyk-scan.outputs.base_image }}';
+            const hasVulns = '${{ steps.top-vulns.outputs.has_vulns }}' === 'true';
+            
+            let statusEmoji = '✅';
+            let statusText = 'Passed';
+            if (critical > 0) {
+              statusEmoji = '❌';
+              statusText = 'Failed - Critical vulnerabilities found';
+            } else if (high > 0) {
+              statusEmoji = '⚠️';
+              statusText = 'Warning - High severity vulnerabilities found';
+            }
+            
+            let comment = `## 🔒 Container Security Scan Results\n\n`;
+            comment += `**Status:** ${statusEmoji} ${statusText}\n`;
+            comment += `**Base Image:** \`${baseImage}\`\n\n`;
+            
+            comment += `### Summary\n`;
+            comment += `| Severity | Count |\n`;
+            comment += `|----------|-------|\n`;
+            comment += `| 🔴 Critical | ${critical} |\n`;
+            comment += `| 🟠 High | ${high} |\n`;
+            comment += `| 🟡 Medium | ${medium} |\n`;
+            comment += `| 🟢 Low | ${low} |\n`;
+            comment += `| **Total** | **${parseInt(critical) + parseInt(high) + parseInt(medium) + parseInt(low)}** |\n\n`;
+            
+            if (hasVulns && (critical > 0 || high > 0)) {
+              const topVulns = fs.readFileSync('top-vulns.txt', 'utf8').trim();
+              comment += `### Top 5 Vulnerabilities\n\n`;
+              comment += topVulns + '\n\n';
+              
+              if (parseInt(critical) + parseInt(high) > 5) {
+                comment += `<details>\n`;
+                comment += `<summary>📄 View all ${parseInt(critical) + parseInt(high)} vulnerabilities</summary>\n\n`;
+                comment += `Download the [full Snyk report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) from workflow artifacts.\n`;
+                comment += `</details>\n\n`;
+              }
+            }
+            
+            comment += `---\n`;
+            comment += `📄 [Download detailed report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) • `;
+            comment += `🔍 [View workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n`;
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('🔒 Container Security Scan Results')
+            );
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-report
+          path: snyk-report.json
+          retention-days: 30
+
+  # ═══════════════════════════════════════════════════════════
+  # JOB 4: Push to Registry
+  # ═══════════════════════════════════════════════════════════
+  push-to-registry:
+    name: Push to JFrog
+    needs: [build-docker-image, security-scan]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        id: load
+        run: |
+          docker load -i taskmaster-image.tar
+          IMAGE=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep taskmaster | head -1)
+          VERSION=$(echo "$IMAGE" | cut -d: -f2)
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Loaded: $IMAGE"
+
+      - name: Tag for registry
+        run: |
+          docker tag ${{ steps.load.outputs.image }} ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.load.outputs.version }}
+          docker tag ${{ steps.load.outputs.image }} ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
+
+      - name: Login to JFrog
+        run: |
+          echo "${{ secrets.JFROG_ACCESS_TOKEN }}" | docker login ${{ env.DOCKER_REGISTRY }} \
+            -u ${{ secrets.JFROG_USERNAME }} --password-stdin
+
+      - name: Push to JFrog
+        run: |
+          docker push ${{ env.DOCKER_REGISTRY }}/taskmaster:${{ steps.load.outputs.version }}
+          docker push ${{ env.DOCKER_REGISTRY }}/taskmaster:latest
+          echo "✅ Pushed to JFrog"
