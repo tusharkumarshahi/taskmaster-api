@@ -157,10 +157,15 @@ jobs:
           echo "📋 Detecting project type..."
           snyk test --print-deps 2>&1 | head -20 || true
           
-          # Run Snyk test - it will use system Maven now
-          snyk test \
-            --json \
-            > snyk-report.json 2>&1 || echo '{"ok": false, "vulnerabilities": []}' > snyk-report.json
+          # Run Snyk test - exit code 1 means vulnerabilities found (not an error)
+          # Exit code 2 means an actual error occurred
+          set +e  # Don't exit on non-zero code
+          snyk test --json > snyk-report.json
+          SNYK_EXIT_CODE=$?
+          set -e
+          
+          echo "📊 Snyk exit code: $SNYK_EXIT_CODE"
+          echo "   (0=no issues, 1=vulnerabilities found, 2=error)"
           
           # Debug: Show first few lines of report
           echo "📄 Snyk report preview:"
@@ -168,9 +173,9 @@ jobs:
           
           # Also generate human-readable HTML report
           npm install -g snyk-to-html || true
-          snyk test \
-            --json \
-            2>/dev/null | snyk-to-html -o snyk-report.html 2>/dev/null || echo "<!-- HTML report generation failed -->" > snyk-report.html
+          if [ -f snyk-report.json ] && [ -s snyk-report.json ]; then
+            cat snyk-report.json | snyk-to-html -o snyk-report.html 2>/dev/null || echo "<!-- HTML report generation failed -->" > snyk-report.html
+          fi
           
           # Parse results (handle both single project and multi-project JSON structures)
           if [ -f snyk-report.json ] && [ -s snyk-report.json ]; then
