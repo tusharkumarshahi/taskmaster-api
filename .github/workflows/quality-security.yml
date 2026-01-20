@@ -654,3 +654,23 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Quality Gate Details:**" >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.sonar-qg.outputs.summary }}" >> $GITHUB_STEP_SUMMARY
+
+      # ─────────────────────────────────────────────────────────
+      # Enforce Quality Gate - FAIL pipeline if gate fails
+      # ─────────────────────────────────────────────────────────
+      - name: Enforce Quality Gate
+        if: steps.sonar-qg.outputs.status != 'OK'
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "❌ Quality Gate FAILED!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "Status: ${{ steps.sonar-qg.outputs.status }}"
+          echo ""
+          echo "Quality Gate conditions not met. Please fix the issues before merging:"
+          echo "${{ steps.sonar-qg.outputs.summary }}"
+          echo ""
+          echo "🔗 View detailed report in SonarQube dashboard"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          exit 1
