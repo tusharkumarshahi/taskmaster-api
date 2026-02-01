@@ -1,67 +1,13 @@
-# catalog-info.yaml
-
 apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: taskmaster-api
-  description: Task management API with DevSecOps integration
-
+  description: Task management API service
   annotations:
     github.com/project-slug: tusharkumarshahi/taskmaster-api
-
-    snyk.io/org-id: tusharkumarshahi
-    snyk.io/project-ids: 09431af4-20b9-4d09-b168-0d01fc33d1dd
-
-    sonarqube.org/project-key: tusharkumarshahi_taskmaster-api
-
-    github.com/workflows: "build-deploy.yml,quality-security.yml"
-
-    backstage.io/techdocs-ref: dir:.
-
-  tags:
-    - api
-    - rest
-    - devsecops
-    - taskmaster
-    - java
-
-  links:
-    - url: "https://github.com/tusharkumarshahi/taskmaster-api"
-      title: GitHub Repository
-      icon: github
-
-    - url: "https://app.snyk.io/org/tusharkumarshahi/projects"
-      title: Snyk Security Scans
-      icon: security
-
-    - url: "https://sonarcloud.io/dashboard?id=tusharkumarshahi_taskmaster-api"
-      title: SonarCloud Quality Gate
-      icon: dashboard
-
+    jfrog.com/artifactory-repo: docker-trial
 spec:
   type: service
-  lifecycle: experimental
-  owner: platform-team
-  system: taskmaster-system
-
-  providesApis:
-    - taskmaster-rest-api
----
-apiVersion: backstage.io/v1alpha1
-kind: System
-metadata:
-  name: taskmaster-system
-  description: Task management system
-spec:
-  owner: platform-team
-  domain: productivity
-
----
-apiVersion: backstage.io/v1alpha1
-kind: Group
-metadata:
-  name: platform-team
-  description: Platform engineering team
-spec:
-  type: team
-  children: []
+  lifecycle: production
+  owner: team-backend  
+  system: taskmaster  
