@@ -5,9 +5,16 @@ metadata:
   description: Task management API service
   annotations:
     github.com/project-slug: tusharkumarshahi/taskmaster-api
-    jfrog.com/artifactory-repo: docker-trial
+    backstage.io/techdocs-ref: dir:.  
+  links:
+    - url: https://github.com/tusharkumarshahi/taskmaster-api
+      title: Repository
+      icon: github
+    - url: https://sonarcloud.io/project/overview?id=tusharkumarshahi_taskmaster-api
+      title: SonarQube
+      icon: dashboard
 spec:
   type: service
   lifecycle: production
-  owner: team-backend  
-  system: taskmaster  
+  owner: team-backend
+  system: taskmaster
