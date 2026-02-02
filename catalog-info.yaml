@@ -6,6 +6,7 @@ metadata:
   annotations:
     github.com/project-slug: tusharkumarshahi/taskmaster-api
     backstage.io/techdocs-ref: dir:.  
+    sonarqube.org/project-key: tusharkumarshahi_taskmaster-api
   links:
     - url: https://github.com/tusharkumarshahi/taskmaster-api
       title: Repository
