@@ -8,9 +8,11 @@ metadata:
     backstage.io/techdocs-ref: dir:.  
     sonarqube.org/project-key: tusharkumarshahi_taskmaster-api
 
-    prometheus.io/rule: 'sum(rate(http_requests_total{job="taskmaster-api"}[5m]))'
+    prometheus.io/rule: 'rate(container_cpu_usage_seconds_total{id=~"/docker/.*"}[5m]) * 100'
     prometheus.io/alert: 'all'
     grafana/dashboard-uid: 'adx6qg5'
+    grafana/alert-label-selector: 'service=backstage'
+
 
   links:
     - url: https://github.com/tusharkumarshahi/taskmaster-api
