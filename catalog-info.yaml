@@ -7,13 +7,13 @@ metadata:
     github.com/project-slug: tusharkumarshahi/taskmaster-api
     backstage.io/techdocs-ref: dir:.  
     sonarqube.org/project-key: tusharkumarshahi_taskmaster-api
-
-    prometheus.io/rule: 'rate(container_cpu_usage_seconds_total{id=~"/docker/.*"}[5m]) * 100'
+    
+    prometheus.io/rule: |
+      rate(container_cpu_usage_seconds_total{id=~"/docker/.*"}[5m]) * 100
     prometheus.io/alert: 'all'
-    grafana/dashboard-uid: 'adx6qg5'
-    grafana/alert-label-selector: 'service=backstage'
-
-
+    grafana/dashboard-selector: "(tags @> 'backstage' || tags @> 'taskmaster')"
+    grafana/alert-label-selector: "job=~\"cadvisor|node-exporter\""
+    
   links:
     - url: https://github.com/tusharkumarshahi/taskmaster-api
       title: Repository
@@ -21,9 +21,10 @@ metadata:
     - url: https://sonarcloud.io/project/overview?id=tusharkumarshahi_taskmaster-api
       title: SonarQube
       icon: dashboard
-    - url: http://localhost:3001
-      title: Grafana
+    - url: http://localhost:3001/d/adx6qg5
+      title: Grafana Dashboard
       icon: dashboard
+      
 spec:
   type: service
   lifecycle: production
