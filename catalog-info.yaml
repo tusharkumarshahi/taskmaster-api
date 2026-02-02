@@ -10,7 +10,7 @@ metadata:
 
     prometheus.io/rule: 'sum(rate(http_requests_total{job="taskmaster-api"}[5m]))'
     prometheus.io/alert: 'all'
-    grafana/dashboard-selector: "(tags @> 'taskmaster' || tags @> 'application')"
+    grafana/dashboard-uid: 'adx6qg5'
 
   links:
     - url: https://github.com/tusharkumarshahi/taskmaster-api
