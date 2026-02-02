@@ -8,8 +8,7 @@ metadata:
     backstage.io/techdocs-ref: dir:.  
     sonarqube.org/project-key: tusharkumarshahi_taskmaster-api
     prometheus.io/rule: up
-    
-    grafana/dashboard-selector: "(uid == 'adx6qg5')"
+    grafana/dashboard-uid: adx6qg5
     grafana/alert-label-selector: ".*"
 
     
