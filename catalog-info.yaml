@@ -8,10 +8,8 @@ metadata:
     backstage.io/techdocs-ref: dir:.  
     sonarqube.org/project-key: tusharkumarshahi_taskmaster-api
     prometheus.io/rule: up
-    grafana/dashboard-uid: adx6qg5
+    grafana/dashboard-selector: "(uid == 'adx6qg5')"
     grafana/alert-label-selector: ".*"
-
-    
   links:
     - url: https://github.com/tusharkumarshahi/taskmaster-api
       title: Repository
