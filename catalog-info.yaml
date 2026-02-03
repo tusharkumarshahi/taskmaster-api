@@ -23,7 +23,7 @@ metadata:
     - url: http://localhost:9090
       title: Prometheus
       icon: dashboard
-    - url: http://localhost:3002/services/taskmaster-api/overview
+    - url: http://localhost:3002/docs/services/taskmaster-api/overview
       title: API Documentation
       icon: docs
       
