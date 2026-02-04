@@ -10,6 +10,7 @@ metadata:
     prometheus.io/rule: up
     grafana/dashboard-selector: "(title == 'backstage')"
     grafana/alert-label-selector: ".*"
+    docusaurus.io/docs-path: '/services/taskmaster-api/overview'
   links:
     - url: https://github.com/tusharkumarshahi/taskmaster-api
       title: Repository
