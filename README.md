@@ -22,4 +22,5 @@ Simple Task Management REST API built with Spring Boot.
 
 - Add more integration tests
 - Improve complex method in TaskServiceImpl
+- Add AI
 
