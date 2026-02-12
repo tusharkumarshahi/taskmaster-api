@@ -16,4 +16,4 @@ spec:
           service:
             name: taskmaster-api
             port:
-              number: 8081  # Match the service port
+              number: 8080

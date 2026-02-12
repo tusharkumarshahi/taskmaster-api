@@ -7,7 +7,7 @@ metadata:
     app: taskmaster-api
     backstage.io/kubernetes-id: taskmaster-api
 spec:
-  replicas: 2
+  replicas: 1  # Single replica for learning (scale manually if needed)
   selector:
     matchLabels:
       app: taskmaster-api
@@ -15,44 +15,37 @@ spec:
     metadata:
       labels:
         app: taskmaster-api
-        version: v1
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
-        prometheus.io/path: "/actuator/prometheus"  # Spring Boot Actuator default
     spec:
       containers:
       - name: taskmaster-api
         image: taskmaster-api:latest
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: IfNotPresent  # Use local image from Minikube
         ports:
-        - containerPort: 8080  # Internal container port
+        - containerPort: 8080
           name: http
         env:
-        - name: SPRING_PROFILES_ACTIVE
-          value: "production"
-        - name: SERVER_PORT
-          value: "8080"
         - name: JAVA_OPTS
-          value: "-Xmx256m -Xms128m"
+          value: "-Xmx512m -Xms256m"
         resources:
           requests:
             memory: "256Mi"
-            cpu: "200m"
+            cpu: "100m"
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "768Mi"  # More headroom for Java startup
+            cpu: "1000m"
         livenessProbe:
           httpGet:
-            path: /actuator/health/liveness  # Spring Boot Actuator
+            path: /actuator/health/liveness
             port: 8080
-          initialDelaySeconds: 60  # Java apps take longer to start
+          initialDelaySeconds: 90  # Java apps need time to start
           periodSeconds: 10
+          timeoutSeconds: 3
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /actuator/health/readiness  # Spring Boot Actuator
+            path: /actuator/health/readiness
             port: 8080
-          initialDelaySeconds: 30
+          initialDelaySeconds: 45
           periodSeconds: 5
+          timeoutSeconds: 3
           failureThreshold: 3
