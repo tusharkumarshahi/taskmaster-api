@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskmaster-api
+  namespace: taskmaster
+  labels:
+    app: taskmaster-api
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8081  # External port (to avoid conflict with DevLake's 8080)
+    targetPort: 8080  # Internal container port
+    protocol: TCP
+    name: http
+  selector:
+    app: taskmaster-api

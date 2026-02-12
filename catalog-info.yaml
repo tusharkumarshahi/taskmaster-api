@@ -2,8 +2,9 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: taskmaster-api
-  description: Task management API service
+  description: Task management API service (Java/Spring Boot)
   annotations:
+    # Existing annotations
     github.com/project-slug: tusharkumarshahi/taskmaster-api
     backstage.io/techdocs-ref: dir:.  
     sonarqube.org/project-key: tusharkumarshahi_taskmaster-api
@@ -11,6 +12,23 @@ metadata:
     grafana/dashboard-selector: "(title == 'backstage')"
     grafana/alert-label-selector: ".*"
     docusaurus.io/docs-path: '/docs/services/taskmaster-api/overview'
+    
+    # Kubernetes integration
+    backstage.io/kubernetes-id: taskmaster-api
+    backstage.io/kubernetes-namespace: taskmaster
+    
+    # DORA metrics (DevLake)
+    devlake.apache.org/project: Taskmaster
+    
+    # CI/CD tracking
+    github.com/workflows: build-and-deploy.yml
+    
+  tags:
+    - java
+    - spring-boot
+    - api
+    - rest
+    
   links:
     - url: https://github.com/tusharkumarshahi/taskmaster-api
       title: Repository
@@ -27,6 +45,15 @@ metadata:
     - url: http://localhost:3002/docs/services/taskmaster-api/overview
       title: API Documentation
       icon: docs
+    - url: http://taskmaster-api.local
+      title: Kubernetes Service (Local)
+      icon: web
+    - url: http://localhost:4000
+      title: DevLake Dashboard
+      icon: dashboard
+    - url: http://taskmaster-api.local/actuator
+      title: Spring Boot Actuator
+      icon: dashboard
       
 spec:
   type: service
