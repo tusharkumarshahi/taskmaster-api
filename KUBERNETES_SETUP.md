@@ -92,7 +92,7 @@ curl http://taskmaster-api.local/actuator/health
 
 ```bash
 # Forward port 8080 from pod to localhost:8080
-kubectl port-forward -n taskmaster svc/taskmaster-api 8080:8081
+kubectl port-forward -n taskmaster svc/taskmaster-api 8080:8080
 
 # In another terminal, test
 curl http://localhost:8080/actuator/health
