@@ -15,6 +15,7 @@ spec:
     metadata:
       labels:
         app: taskmaster-api
+        backstage.io/kubernetes-id: taskmaster-api  
     spec:
       containers:
       - name: taskmaster-api
