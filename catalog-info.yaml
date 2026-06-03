@@ -12,6 +12,9 @@ metadata:
     grafana/dashboard-selector: "(title == 'backstage')"
     grafana/alert-label-selector: ".*"
     docusaurus.io/docs-path: '/docs/services/taskmaster-api/overview'
+    devplatform.io/runtime: "java:17"
+    devplatform.io/framework: "spring-boot:3.2"
+    devplatform.io/build-tool: "gradle:8"
     
     # Kubernetes integration
     backstage.io/kubernetes-id: taskmaster-api
